@@ -210,7 +210,7 @@ end
 end
 
 # Convert conservative variables to entropy
-@inline function cons2entropy(uA, equations::NonIdealCompressibleEulerEquations1D)
+@inline function cons2entropy(uA, equations::NonIdealQuasiCompressibleEulerEquations1D)
     V, v1, T, _ = cons2prim(uA, equations)
     eos = equations.equation_of_state
     gibbs = gibbs_free_energy(V, T, eos)
