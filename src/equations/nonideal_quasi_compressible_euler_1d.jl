@@ -350,14 +350,10 @@ end
 
 #TODO documentation
 
-function area(x)
-    return 1 + 0.5 * cos(2*pi*x)
-end
-p_inflow() = 1e6;
-p_outflow() = 0.5e6;
-
 function initial_condition_nozzle(x, t, equations::NonIdealQuasiCompressibleEulerEquations1D) 
 
+    p_inflow() = 1e6;
+    p_outflow() = 0.5e6;
     T0 = 453.0 # Kelvin
     if (x < 0.5) 
         p = 1e6
@@ -368,7 +364,7 @@ function initial_condition_nozzle(x, t, equations::NonIdealQuasiCompressibleEule
     rho_inflow = density_pT(p, T0, equations)
     u_inflow = 0.0
 
-    A = area(x)
+    A = 1 + 0.5 * cos(2*pi*x)
     rho_e = rho_e_rhoP(rho_inflow, p, equations)
     rho_E = rho_e + 0.5 * rho_inflow * u_inflow^2;
     return A* SVector(rho_inflow, rho_inflow * u_inflow, rho_E, 1)

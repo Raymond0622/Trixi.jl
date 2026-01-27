@@ -5,6 +5,8 @@ using Trixi: ForwardDiff
 # if subsonic, the specified outlet pressure 
 # msut be the ambient pressure (p_star)
 # for the nozzle problem
+p_inflow() = 1e6;
+p_outflow() = 0.5e6;
 # https://www.sciencedirect.com/science/article/pii/S0029549310005157?ref=pdf_download&fr=RR-2&rr=9bcddc6449a3290b
 function nozzle_outlet_subsonic(uA_ll, p_star, equations::NonIdealQuasiCompressibleEulerEquations1D)
     model = equations.eos 
@@ -74,7 +76,7 @@ end
 eos = StiffenedGas();
 volume_flux = flux_asym 
 equations = NonIdealQuasiCompressibleEulerEquations1D(eos) 
-initial_condition = initial_condition_density_wave_stiffened_gas
+initial_condition = initial_condition_nozzle
 
 solver = DGSEM(polydeg=3, volume_integral = VolumeIntegralFluxDifferencing(volume_flux),
                 surface_flux=flux_lax_friedrichs) 
