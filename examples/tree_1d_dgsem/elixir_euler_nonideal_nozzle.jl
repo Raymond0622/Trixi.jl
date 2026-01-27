@@ -84,8 +84,8 @@ coordinates_max = 1.0
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level=8, 
                 n_cells_max=30_000)
-boundary_conditions = (x_neg = BoundaryConditionsDirichlet(inlet_stagnation_nozzle),
-                        x_pos = BoundaryConditionDirechlet(nozzle_outlet_subsonic));
+boundary_conditions = (x_neg = BoundaryConditionDirichlet(inlet_stagnation_nozzle),
+                        x_pos = BoundaryConditionDirichlet(nozzle_outlet_subsonic));
 
 semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver,
                                     boundary_conditions = boundary_conditions)

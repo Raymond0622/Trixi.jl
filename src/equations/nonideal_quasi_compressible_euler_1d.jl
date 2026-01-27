@@ -42,7 +42,7 @@ Because of this, the primitive variables are also defined to be `V, v1, T` (inst
 mass basis unless otherwise specified.     
 """
 struct NonIdealQuasiCompressibleEulerEquations1D{EoS <: AbstractEquationOfState} <:
-       AbstractNonIdealQuasiCompressibleEulerEquations{1, 4}
+       AbstractNonIdealCompressibleEulerEquations{1, 4}
     equation_of_state::EoS
 end
 
@@ -237,7 +237,7 @@ S = -\rho s
 ```
 where `s` is the specific entropy determined by the equation of state.
 """
-@inline function entropy_math(uA, equations::AbstractNonIdealQuasiCompressibleEulerEquations)
+@inline function entropy_math(uA, equations::AbstractNonIdealCompressibleEulerEquations)
     eos = equations.equation_of_state
     u = A2cons(uA, equations)
     q = cons2prim(u, equations)
@@ -274,7 +274,7 @@ end
     return v1
 end
 
-@inline function pressure(uA, equations::AbstractNonIdealQuasiCompressibleEulerEquations)
+@inline function pressure(uA, equations::AbstractNonIdealCompressibleEulerEquations)
     eos = equations.equation_of_state
     u = A2cons(uA, equations)
     q = cons2prim(u, equations)
@@ -285,7 +285,7 @@ end
 end
 
 @inline function density_pressure(uA,
-                                  equations::AbstractNonIdealQuasiCompressibleEulerEquations)
+                                  equations::AbstractNonIdealCompressibleEulerEquations)
     eos = equations.equation_of_state
     u = A2cons(uA, equations)
     rho = u[1]
@@ -297,7 +297,7 @@ end
 end
 
 @inline function energy_internal(uA,
-                                 equations::AbstractNonIdealQuasiCompressibleEulerEquations)
+                                 equations::AbstractNonIdealCompressibleEulerEquations)
     eos = equations.equation_of_state
     u = A2cons(uA, equations)
     q = cons2prim(u, equations)
@@ -308,7 +308,7 @@ end
 end
 
 @inline function internal_energy_density(uA,
-                                         equations::NonIdealQuasiCompressibleEulerEquations1D)
+                                         equations::NonIdealCompressibleEulerEquations1D)
     u = A2cons(uA, equations)
     rho, rho_v1, rho_e_total = u
     rho_e = rho_e_total - 0.5f0 * rho_v1^2 / rho

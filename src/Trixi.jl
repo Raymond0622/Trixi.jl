@@ -183,6 +183,7 @@ export AcousticPerturbationEquations2D,
        PassiveTracerEquations
 
 export NonIdealCompressibleEulerEquations1D, NonIdealCompressibleEulerEquations2D
+export NonIdealQuasiCompressibleEulerEquations1D
 export IdealGas, VanDerWaals, PengRobinson
 export initial_condition_Riemann_problem, initial_condition_transcritical_wave,
        initial_condition_transcritical_shock
