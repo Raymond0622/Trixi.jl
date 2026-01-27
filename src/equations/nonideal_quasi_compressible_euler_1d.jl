@@ -47,7 +47,7 @@ struct NonIdealQuasiCompressibleEulerEquations1D{EoS <: AbstractEquationOfState}
 end
 
 function varnames(::typeof(cons2cons), ::NonIdealQuasiCompressibleEulerEquations1D)
-    return ("a_rho", "a_rho_v1", "a_rho_e_total, a")
+    return ("a_rho", "a_rho_v1", "a_rho_e_total", "a")
 end
 varnames(::typeof(cons2prim), ::NonIdealQuasiCompressibleEulerEquations1D) = ("V", "v1", "T", "a")
 
