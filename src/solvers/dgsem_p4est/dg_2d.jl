@@ -9,7 +9,8 @@
 # and called from the basic `create_cache` method at the top.
 function create_cache(mesh::Union{P4estMesh{2}, P4estMeshView{2}, T8codeMesh{2}},
                       equations,
-                      mortar_l2::LobattoLegendreMortarL2, uEltype)
+                      mortar_l2::Union{LobattoLegendreMortarL2,
+                                       LobattoLegendreMortarEntropy}, uEltype)
     MA2d = MArray{Tuple{nvariables(equations), nnodes(mortar_l2)},
                   uEltype, 2,
                   nvariables(equations) * nnodes(mortar_l2)}
@@ -922,10 +923,227 @@ function prolong2mortars!(cache, u,
     return nothing
 end
 
+
+function prolong2mortars!(cache, u,
+                          mesh::Union{P4estMesh{2}, P4estMeshView{2}, T8codeMesh{2}},
+                          equations,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM)
+    @unpack neighbor_ids, node_indices = cache.mortars
+    index_range = eachnode(dg)
+
+    @threaded for mortar in eachmortar(dg, cache)
+        # Copy solution data from the small elements using "delayed indexing" with
+        # a start value and a step size to get the correct face and orientation.
+        small_indices = node_indices[1, mortar]
+
+        i_small_start, i_small_step = index_to_start_step_2d(small_indices[1],
+                                                             index_range)
+        j_small_start, j_small_step = index_to_start_step_2d(small_indices[2],
+                                                             index_range)
+        for position in 1:2
+            i_small = i_small_start
+            j_small = j_small_start
+            element = neighbor_ids[position, mortar]
+            for i in eachnode(dg)
+                u_node = get_node_vars(u, equations, dg, i_small, j_small, element);
+                v_node = cons2entropy(u_node, equations)
+                for v in eachvariable(equations)
+                    # going to contain entropy variables instead of u
+                    cache.mortars.u[1, v, position, i, mortar] = v_node[v]
+                end
+                i_small += i_small_step
+                j_small += j_small_step
+            end
+        end
+
+        # Buffer to copy solution values of the large element in the correct orientation
+        # before interpolating
+        u_buffer = cache.u_threaded[Threads.threadid()]
+
+        # Copy solution of large element face to buffer in the
+        # correct orientation
+        large_indices = node_indices[2, mortar]
+
+        i_large_start, i_large_step = index_to_start_step_2d(large_indices[1],
+                                                             index_range)
+        j_large_start, j_large_step = index_to_start_step_2d(large_indices[2],
+                                                             index_range)
+        i_large = i_large_start
+        j_large = j_large_start
+        element = neighbor_ids[3, mortar]
+        for i in eachnode(dg)
+            u_node = get_node_vars(u, equations, dg, i_large, j_large, element);
+            v_node = cons2entropy(u_node, equations)
+            for v in eachvariable(equations)
+                u_buffer[v, i] = v_node[v] #u[v, i_large, j_large, element]
+            end
+            i_large += i_large_step
+            j_large += j_large_step
+        end
+
+        # Interpolate large element face data from buffer to small face locations
+        multiply_dimensionwise!(view(cache.mortars.u, 2, :, 1, :, mortar),
+                                mortar_l2.forward_lower,
+                                u_buffer)
+        multiply_dimensionwise!(view(cache.mortars.u, 2, :, 2, :, mortar),
+                                mortar_l2.forward_upper,
+                                u_buffer)
+    end
+
+    # Convert interpolated entropy variables back to conserved variables
+    @threaded for mortar in eachmortar(dg, cache)
+        for large_small in 1:2
+            for position in 1:2
+                for i in eachnode(dg)
+                    v_node = cache.mortars.u[large_small, :, position, i, mortar];
+                    u_node = entropy2cons(v_node, equations)
+                    for v in eachvariable(equations)
+                        cache.mortars.u[large_small, v, position, i, mortar] = u_node[v]
+                    end
+                end
+            end
+        end
+    end
+
+    return nothing
+end
+
+# Viscous terms interpolate transformed variables and fluxes, not entropy variables.
+function prolong2mortars!(cache, u,
+                          mesh::Union{P4estMesh{2}, P4estMeshView{2}, T8codeMesh{2}},
+                          equations::AbstractEquationsParabolic,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM)
+    @unpack neighbor_ids, node_indices = cache.mortars
+    index_range = eachnode(dg)
+
+    @threaded for mortar in eachmortar(dg, cache)
+        small_indices = node_indices[1, mortar]
+
+        i_small_start, i_small_step = index_to_start_step_2d(small_indices[1],
+                                                             index_range)
+        j_small_start, j_small_step = index_to_start_step_2d(small_indices[2],
+                                                             index_range)
+
+        for position in 1:2
+            i_small = i_small_start
+            j_small = j_small_start
+            element = neighbor_ids[position, mortar]
+            for i in eachnode(dg)
+                for v in eachvariable(equations)
+                    cache.mortars.u[1, v, position, i, mortar] = u[v, i_small, j_small,
+                                                                   element]
+                end
+                i_small += i_small_step
+                j_small += j_small_step
+            end
+        end
+
+        u_buffer = cache.u_threaded[Threads.threadid()]
+
+        large_indices = node_indices[2, mortar]
+
+        i_large_start, i_large_step = index_to_start_step_2d(large_indices[1],
+                                                             index_range)
+        j_large_start, j_large_step = index_to_start_step_2d(large_indices[2],
+                                                             index_range)
+
+        i_large = i_large_start
+        j_large = j_large_start
+        element = neighbor_ids[3, mortar]
+        for i in eachnode(dg)
+            for v in eachvariable(equations)
+                u_buffer[v, i] = u[v, i_large, j_large, element]
+            end
+            i_large += i_large_step
+            j_large += j_large_step
+        end
+
+        multiply_dimensionwise!(view(cache.mortars.u, 2, :, 1, :, mortar),
+                                mortar_l2.forward_lower,
+                                u_buffer)
+        multiply_dimensionwise!(view(cache.mortars.u, 2, :, 2, :, mortar),
+                                mortar_l2.forward_upper,
+                                u_buffer)
+    end
+
+    return nothing
+end
+
 function calc_mortar_flux!(surface_flux_values,
                            mesh::Union{P4estMesh{2}, P4estMeshView{2}, T8codeMesh{2}},
                            have_nonconservative_terms, equations,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,LobattoLegendreMortarEntropy},
+                           surface_integral, dg::DG, cache)
+    @unpack neighbor_ids, node_indices = cache.mortars
+    @unpack contravariant_vectors = cache.elements
+    @unpack (fstar_primary_upper_threaded, fstar_primary_lower_threaded,
+    fstar_secondary_upper_threaded, fstar_secondary_lower_threaded) = cache
+    index_range = eachnode(dg)
+
+    @threaded for mortar in eachmortar(dg, cache)
+        # Choose thread-specific pre-allocated container
+        fstar_primary = (fstar_primary_lower_threaded[Threads.threadid()],
+                         fstar_primary_upper_threaded[Threads.threadid()])
+
+        fstar_secondary = (fstar_secondary_lower_threaded[Threads.threadid()],
+                           fstar_secondary_upper_threaded[Threads.threadid()])
+
+        # Get index information on the small elements
+        small_indices = node_indices[1, mortar]
+        small_direction = indices2direction(small_indices)
+
+        i_small_start, i_small_step = index_to_start_step_2d(small_indices[1],
+                                                             index_range)
+        j_small_start, j_small_step = index_to_start_step_2d(small_indices[2],
+                                                             index_range)
+
+        for position in 1:2
+            i_small = i_small_start
+            j_small = j_small_start
+            element = neighbor_ids[position, mortar]
+            for node in eachnode(dg)
+                # Get the normal direction on the small element.
+                # Note, contravariant vectors at interfaces in negative coordinate direction
+                # are pointing inwards. This is handled by `get_normal_direction`.
+                normal_direction = get_normal_direction(small_direction,
+                                                        contravariant_vectors,
+                                                        i_small, j_small, element)
+
+                calc_mortar_flux!(fstar_primary, fstar_secondary,
+                                  mesh, have_nonconservative_terms, equations,
+                                  surface_integral, dg, cache,
+                                  mortar, position, normal_direction,
+                                  node)
+
+                i_small += i_small_step
+                j_small += j_small_step
+            end
+        end
+
+        # Buffer to interpolate flux values of the large element to before
+        # copying in the correct orientation
+        u_buffer = cache.u_threaded[Threads.threadid()]
+
+        # in calc_interface_flux!, the interface flux is computed once over each
+        # interface using the normal from the "primary" element. The result is then
+        # passed back to the "secondary" element, flipping the sign to account for the
+        # change in the normal direction. For mortars, this sign flip occurs in
+        # "mortar_fluxes_to_elements!" instead.
+        mortar_fluxes_to_elements!(surface_flux_values,
+                                   mesh, equations, mortar_l2, dg, cache,
+                                   mortar, fstar_primary, fstar_secondary,
+                                   u_buffer)
+    end
+
+    return nothing
+end
+
+function calc_mortar_flux!(surface_flux_values,
+                           mesh::Union{P4estMesh{2}, P4estMeshView{2}, T8codeMesh{2}},
+                           have_nonconservative_terms, equations,
+                           mortar_l2::LobattoLegendreMortarEntropy,
                            surface_integral, dg::DG, cache)
     @unpack neighbor_ids, node_indices = cache.mortars
     @unpack contravariant_vectors = cache.elements
@@ -1052,7 +1270,8 @@ end
 @inline function mortar_fluxes_to_elements!(surface_flux_values,
                                             mesh::Union{P4estMesh{2}, T8codeMesh{2}},
                                             equations,
-                                            mortar_l2::LobattoLegendreMortarL2,
+                                            mortar_l2::Union{LobattoLegendreMortarL2,
+                                                             LobattoLegendreMortarEntropy},
                                             dg::DGSEM, cache, mortar, fstar_primary,
                                             fstar_secondary, u_buffer)
     @unpack neighbor_ids, node_indices = cache.mortars

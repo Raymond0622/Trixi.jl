@@ -37,6 +37,9 @@ abstract type AbstractMortar{RealT <: Real} end
 # which will be specialized for different SBP bases
 abstract type AbstractMortarL2{RealT <: Real} <: AbstractMortar{RealT} end
 
+# abstract supertype of mortar methods that interpolate in entropy variables
+abstract type AbstractMortarEntropy{RealT <: Real} <: AbstractMortar{RealT} end
+
 # abstract supertype of functionality related to the analysis of
 # numerical solutions, e.g. the calculation of errors
 abstract type SolutionAnalyzer{RealT <: Real} end

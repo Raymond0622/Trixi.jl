@@ -229,6 +229,75 @@ end
 
 @inline polydeg(mortar::LobattoLegendreMortarL2) = nnodes(mortar) - 1
 
+struct LobattoLegendreMortarEntropy{RealT <: Real, NNODES,
+                                    ForwardMatrix <: AbstractMatrix{RealT},
+                                    ReverseMatrix <: AbstractMatrix{RealT}} <:
+       AbstractMortarEntropy{RealT}
+    forward_upper::ForwardMatrix
+    forward_lower::ForwardMatrix
+    reverse_upper::ReverseMatrix
+    reverse_lower::ReverseMatrix
+end
+
+function Adapt.adapt_structure(to, mortar::LobattoLegendreMortarEntropy)
+    forward_upper = adapt(to, mortar.forward_upper)
+    forward_lower = adapt(to, mortar.forward_lower)
+    reverse_upper = adapt(to, mortar.reverse_upper)
+    reverse_lower = adapt(to, mortar.reverse_lower)
+    return LobattoLegendreMortarEntropy{eltype(forward_upper), nnodes(mortar),
+                                        typeof(forward_upper),
+                                        typeof(reverse_upper)}(forward_upper, forward_lower,
+                                                               reverse_upper, reverse_lower)
+end
+
+"""
+    MortarEntropy(basis::LobattoLegendreBasis)
+    MortarEntropy(polydeg::Integer)
+
+Create a mortar that interpolates in entropy variables using the same L²
+projection operators as `MortarL2`.
+"""
+function MortarEntropy(basis::LobattoLegendreBasis)
+    RealT = real(basis)
+    nnodes_ = nnodes(basis)
+
+    forward_upper = calc_forward_upper(nnodes_, RealT)
+    forward_lower = calc_forward_lower(nnodes_, RealT)
+    reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss), RealT)
+    reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss), RealT)
+
+    return LobattoLegendreMortarEntropy{RealT, nnodes_, typeof(forward_upper),
+                                        typeof(reverse_upper)}(forward_upper, forward_lower,
+                                                               reverse_upper, reverse_lower)
+end
+
+MortarEntropy(polydeg::Integer) = MortarEntropy(LobattoLegendreBasis(polydeg))
+
+function Base.show(io::IO, mortar::LobattoLegendreMortarEntropy)
+    @nospecialize mortar # reduce precompilation time
+
+    print(io, "LobattoLegendreMortarEntropy{", real(mortar), "}(polydeg=", polydeg(mortar),
+          ")")
+    return nothing
+end
+function Base.show(io::IO, ::MIME"text/plain", mortar::LobattoLegendreMortarEntropy)
+    @nospecialize mortar # reduce precompilation time
+
+    print(io, "LobattoLegendreMortarEntropy{", real(mortar),
+          "} with polynomials of degree ",
+          polydeg(mortar))
+    return nothing
+end
+
+@inline Base.real(mortar::LobattoLegendreMortarEntropy{RealT}) where {RealT} = RealT
+
+@inline function nnodes(mortar::LobattoLegendreMortarEntropy{RealT, NNODES}) where {RealT,
+                                                                                   NNODES}
+    return NNODES
+end
+
+@inline polydeg(mortar::LobattoLegendreMortarEntropy) = nnodes(mortar) - 1
+
 # TODO: We can create EC mortars along the lines of the following implementation.
 # abstract type AbstractMortarEC{RealT} <: AbstractMortar{RealT} end
 

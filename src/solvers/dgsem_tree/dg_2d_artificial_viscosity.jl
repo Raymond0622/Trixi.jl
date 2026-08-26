@@ -232,7 +232,7 @@
                            boundary_conditions, boundary_conditions_parabolic,
                            source_terms::Source,
                            dg::DG, parabolic_scheme, cache, cache_parabolic) where {Source}
-        (; u_transformed, flux_viscous, gradients) = cache_parabolic.viscous_container
+        (; u_transformed, flux_parabolic, gradients) = cache_parabolic.parabolic_container
         # Reset du
         @trixi_timeit timer() "reset ∂u/∂t" set_zero!(du, dg, cache)
 
@@ -240,7 +240,7 @@
 
         # Calculate volume integral
         @trixi_timeit timer() "volume integral" begin
-            calc_volume_integral!(du, u, mesh,
+            calc_volume_integral!(nothing, du, u, mesh,
                                   have_nonconservative_terms(equations), equations,
                                   dg.volume_integral, dg, cache)
         end
@@ -254,12 +254,12 @@
 
         # Prolong solution to interfaces
         @trixi_timeit timer() "prolong2interfaces" begin
-            prolong2interfaces!(cache, u, mesh, equations, dg)
+            prolong2interfaces!(nothing, cache, u, mesh, equations, dg)
         end
 
         # Calculate interface fluxes
         @trixi_timeit timer() "interface flux" begin
-            calc_interface_flux!(cache.elements.surface_flux_values, mesh,
+            calc_interface_flux!(nothing, cache.elements.surface_flux_values, mesh,
                                  have_nonconservative_terms(equations), equations,
                                  dg.surface_integral, dg, cache)
         end
@@ -275,9 +275,21 @@
                                 dg.surface_integral, dg)
         end
 
+        # Prolong solution to mortars
+        @trixi_timeit timer() "prolong2mortars" begin
+            prolong2mortars!(cache, u, mesh, equations, dg.mortar, dg)
+        end
+
+        # Calculate mortar fluxes
+        @trixi_timeit timer() "mortar flux" begin
+            calc_mortar_flux!(cache.elements.surface_flux_values, mesh,
+                              have_nonconservative_terms(equations), equations,
+                              dg.mortar, dg.surface_integral, dg, cache)
+        end
+
         # Calculate surface integrals
         @trixi_timeit timer() "surface integral" begin
-            calc_surface_integral!(du, u, mesh, equations,
+            calc_surface_integral!(nothing, du, u, mesh, equations,
                                    dg.surface_integral, dg, cache)
         end
 
@@ -299,37 +311,31 @@
         # ========= AV specific part ============
 
         @trixi_timeit timer() "calculate AV viscous fluxes" begin
-            calc_viscous_fluxes!(flux_viscous, gradients, u_transformed, mesh,
-                                 equations_artificial_viscosity, dg, cache)
+            calc_parabolic_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
+                                   equations_artificial_viscosity, dg, cache)
         end
 
-        calc_ecav_coefficients!(flux_viscous, gradients, entropy_residual, equations, mesh,
-                                dg, cache)
-
-        # # TODO: accumulate into flux_viscous instead
-        # # accumulate the AV term
-        # @trixi_timeit timer() "calc AV divergence" calc_divergence!(du, flux_viscous, u, mesh, 
-        #                                                             equations_artificial_viscosity, 
-        #                                                             boundaryConditionDoNothing(), 
-        #                                                             dg, parabolic_scheme, cache, t)
+        calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual, equations,
+                                mesh, dg, cache)
 
         # ======== physical parabolic part ==========
 
-        # accumulate physical viscous fluxes    
+        # accumulate physical viscous fluxes
         @trixi_timeit timer() "calculate viscous fluxes" begin
-            accum_viscous_fluxes!(flux_viscous, gradients, u_transformed, mesh,
+            accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
                                   equations_parabolic, dg, cache)
         end
 
-        # TODO: fix BCs for equations_artificial_viscosity
-        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_viscous, u, mesh,
+        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
+                                                                 mesh,
                                                                  equations_parabolic,
                                                                  boundary_conditions_parabolic,
                                                                  dg, parabolic_scheme,
                                                                  cache, t)
 
         # Apply Jacobian from mapping to reference element
-        @trixi_timeit timer() "Jacobian" apply_jacobian!(du, mesh, equations, dg, cache)
+        @trixi_timeit timer() "Jacobian" apply_jacobian!(nothing, du, mesh, equations, dg,
+                                                         cache)
 
         # Calculate source terms
         @trixi_timeit timer() "source terms" begin

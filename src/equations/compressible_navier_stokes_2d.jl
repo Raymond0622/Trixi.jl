@@ -593,4 +593,24 @@ end
     # for Dirichlet boundary conditions, we do not impose any conditions on the parabolic fluxes
     return flux_inner
 end
+
+@inline function (boundary_condition::BoundaryConditionDirichlet)(flux_inner,
+                                                                  u_inner,
+                                                                  normal::AbstractVector,
+                                                                  x, t,
+                                                                  operator_type::Gradient,
+                                                                  equations::CompressibleNavierStokesDiffusion2D{GradientVariablesEntropy})
+    u_boundary = boundary_condition.boundary_value_function(x, t, equations)
+
+    return cons2entropy(u_boundary, equations)
+end
+
+@inline function (boundary_condition::BoundaryConditionDirichlet)(flux_inner,
+                                                                  u_inner,
+                                                                  normal::AbstractVector,
+                                                                  x, t,
+                                                                  operator_type::Divergence,
+                                                                  equations::CompressibleNavierStokesDiffusion2D{GradientVariablesEntropy})
+    return flux_inner
+end
 end # @muladd

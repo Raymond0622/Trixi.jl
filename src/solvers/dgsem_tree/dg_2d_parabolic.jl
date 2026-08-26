@@ -735,7 +735,8 @@ end
 function prolong2mortars!(cache, flux_parabolic::Tuple,
                           mesh::TreeMesh{2},
                           equations_parabolic::AbstractEquationsParabolic,
-                          mortar_l2::LobattoLegendreMortarL2,
+                          mortar_l2::Union{LobattoLegendreMortarL2,
+                                           LobattoLegendreMortarEntropy},
                           dg::DGSEM)
     flux_parabolic_x, flux_parabolic_y = flux_parabolic
     @threaded for mortar in eachmortar(dg, cache)
@@ -844,7 +845,8 @@ end
 # hyperbolic terms with conserved terms only, i.e., no nonconservative terms.
 function calc_mortar_flux!(surface_flux_values, mesh::TreeMesh{2},
                            equations_parabolic::AbstractEquationsParabolic,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,
+                                            LobattoLegendreMortarEntropy},
                            surface_integral, dg::DG,
                            parabolic_scheme, gradient_or_divergence,
                            cache)
@@ -908,7 +910,8 @@ end
 @inline function mortar_fluxes_to_elements!(surface_flux_values,
                                             mesh::TreeMesh{2},
                                             equations_parabolic::AbstractEquationsParabolic,
-                                            mortar_l2::LobattoLegendreMortarL2,
+                                            mortar_l2::Union{LobattoLegendreMortarL2,
+                                                             LobattoLegendreMortarEntropy},
                                             dg::DGSEM, cache,
                                             mortar, fstar_upper, fstar_lower)
     large_element = cache.mortars.neighbor_ids[3, mortar]

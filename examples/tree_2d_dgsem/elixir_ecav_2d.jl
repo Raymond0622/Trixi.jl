@@ -70,17 +70,15 @@ periodicity = (false, false)
 # @inline mu() = 5e-3 # Re = 200
 # @inline mu() = 2e-3  # Re = 500
 # @inline mu() = 0.0013333333333333333 # Re = 750
-@inline mu() = 1e-3 # Re = 1000
+@inline mu() = 0.0
 
-# coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
-# coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
+coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
+coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
 # # initial_condition = initial_condition_blast_wave
 # # tspan = (0.0, 1.5)
-# initial_condition = initial_condition_kelvin_helmholtz_instability
-# tspan = (0.0, 5.0)
-# periodicity = (true, true)
-# # periodicity = (false, false)
-# mu() = 1e-6
+initial_condition = initial_condition_kelvin_helmholtz_instability
+tspan = (0.0, 5.0)
+periodicity = (true, true)
 
 equations = CompressibleEulerEquations2D(1.4)
 equations_parabolic = CompressibleNavierStokesDiffusion2D(equations, mu = mu(),
@@ -105,7 +103,7 @@ dg = DGSEM(polydeg = 3, surface_flux = FluxLaxFriedrichs(max_abs_speed),
 # dg = DGSEM(basis, surface_flux, volume_integral)
 
 # Create a uniformly refined mesh with periodic boundaries
-initial_refinement_level = 9
+initial_refinement_level = 5
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
                 periodicity = periodicity, n_cells_max = 400_000)
@@ -128,10 +126,15 @@ boundary_conditions_parabolic = (; x_neg = boundary_condition_noslip_wall,
                                  y_pos = boundary_condition_noslip_wall)
 
 # solver_parabolic = ViscousFormulationBassiRebay1()
-solver_parabolic = ViscousFormulationLocalDG()
-
+solver_parabolic = ParabolicFormulationLocalDG()
+N = 3
+basis = LobattoLegendreBasis(3)
+nodes = Trixi.get_nodes(basis)
+VDM, _ = Trixi.vandermonde_legendre(nodes, N)
+filter = [((i - 1) / N)^2 for i in 1:(N + 1)]
 if all(mesh.tree.periodicity .== true)
     semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
+                                                 VDM, filter,
                                                  initial_condition, dg;
                                                  combine_rhs = Trixi.True(),
                                                  solver_parabolic = solver_parabolic)
@@ -141,6 +144,7 @@ if all(mesh.tree.periodicity .== true)
 
 else
     semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
+                                                 VDM, filter,
                                                  initial_condition, dg;
                                                  combine_rhs = Trixi.True(),
                                                  solver_parabolic = solver_parabolic,
@@ -170,9 +174,6 @@ callbacks = CallbackSet(summary_callback, alive_callback)
 ###############################################################################
 # run the simulation
 
-stage_limiter! = PositivityPreservingLimiterZhangShu(thresholds = (1.0e-6, 1.0e-6),
-                                                     variables = (Trixi.density, pressure))
-# solver = SSPRK43(stage_limiter!, stage_limiter!)
 solver = SSPRK43()
 
 sol = solve(ode, solver; abstol = 1e-6, reltol = 1e-4, # dt = 1e-8,

@@ -221,7 +221,7 @@ end
 @inline function mortar_fluxes_to_elements_gradient!(surface_flux_values,
                                                      mesh::P4estMesh{2},
                                                      equations_parabolic::AbstractEquationsParabolic,
-                                                     mortar_l2::LobattoLegendreMortarL2,
+                                                     mortar_l2::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy},
                                                      dg::DGSEM, cache, mortar,
                                                      fstar_primary, fstar_secondary,
                                                      u_buffer)
@@ -580,7 +580,7 @@ end
 
 function prolong2mortars_divergence!(cache, flux_parabolic,
                                      mesh::P4estMesh{2}, equations_parabolic,
-                                     mortar_l2::LobattoLegendreMortarL2,
+                                     mortar_l2::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy},
                                      dg::DGSEM)
     @unpack neighbor_ids, node_indices = cache.mortars
     @unpack contravariant_vectors = cache.elements
@@ -670,7 +670,7 @@ end
 
 function calc_mortar_flux_divergence!(surface_flux_values, mesh::P4estMesh{2},
                                       equations_parabolic::AbstractEquationsParabolic,
-                                      mortar_l2::LobattoLegendreMortarL2,
+                                      mortar_l2::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy},
                                       dg::DG, parabolic_scheme, cache)
     @unpack neighbor_ids, node_indices = cache.mortars
     @unpack contravariant_vectors = cache.elements
@@ -736,7 +736,7 @@ end
 function calc_mortar_flux_gradient!(surface_flux_values,
                                     mesh::P4estMesh{2},
                                     equations_parabolic,
-                                    mortar_l2::LobattoLegendreMortarL2,
+                                    mortar_l2::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy},
                                     dg::DG, parabolic_scheme, cache)
     @unpack neighbor_ids, node_indices = cache.mortars
     @unpack contravariant_vectors = cache.elements

@@ -291,7 +291,7 @@ export DG,
        IndicatorEntropyCorrection, IndicatorEntropyCorrectionShockCapturingCombined,
        SurfaceIntegralWeakForm, SurfaceIntegralStrongForm,
        SurfaceIntegralUpwind,
-       MortarL2
+       MortarL2, MortarEntropy
 
 export reconstruction_O2_inner, reconstruction_O2_full,
        reconstruction_constant,

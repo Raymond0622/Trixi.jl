@@ -88,7 +88,8 @@ end
 # The methods below are specialized on the mortar type
 # and called from the basic `create_cache` method at the top.
 function create_cache(mesh::TreeMesh{2}, equations,
-                      mortar_l2::LobattoLegendreMortarL2, uEltype)
+                      mortar_l2::Union{LobattoLegendreMortarL2,
+                                       LobattoLegendreMortarEntropy}, uEltype)
     MA2d = MArray{Tuple{nvariables(equations), nnodes(mortar_l2)},
                   uEltype, 2,
                   nvariables(equations) * nnodes(mortar_l2)}
@@ -96,9 +97,11 @@ function create_cache(mesh::TreeMesh{2}, equations,
     fstar_primary_lower_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
     fstar_secondary_upper_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
     fstar_secondary_lower_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
+    u_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
 
     cache = (; fstar_primary_upper_threaded, fstar_primary_lower_threaded,
-             fstar_secondary_upper_threaded, fstar_secondary_lower_threaded)
+             fstar_secondary_upper_threaded, fstar_secondary_lower_threaded,
+             u_threaded)
 
     return cache
 end
@@ -894,10 +897,31 @@ function calc_boundary_flux_by_direction!(surface_flux_values::AbstractArray{<:A
     return nothing
 end
 
-function prolong2mortars!(cache, u,
+# Restrict `u` to `AbstractArray` so this does not clash with the parabolic
+# `flux_parabolic::Tuple` method in `dg_2d_parabolic.jl` (that method is also
+# specialized on `Union{MortarL2, MortarEntropy}`).
+function prolong2mortars!(cache, u::AbstractArray,
                           mesh::TreeMesh{2}, equations,
                           mortar_l2::LobattoLegendreMortarL2,
                           dg::DGSEM)
+    prolong2mortars_interpolate!(cache, u, mesh, equations, mortar_l2, dg)
+    return nothing
+end
+
+# Viscous terms interpolate transformed variables, not entropy variables.
+function prolong2mortars!(cache, u::AbstractArray,
+                          mesh::TreeMesh{2}, equations::AbstractEquationsParabolic,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM)
+    prolong2mortars_interpolate!(cache, u, mesh, equations, mortar_l2, dg)
+    return nothing
+end
+
+function prolong2mortars_interpolate!(cache, u,
+                                      mesh::TreeMesh{2}, equations,
+                                      mortar_l2::Union{LobattoLegendreMortarL2,
+                                                       LobattoLegendreMortarEntropy},
+                                      dg::DGSEM)
     @threaded for mortar in eachmortar(dg, cache)
         large_element = cache.mortars.neighbor_ids[3, mortar]
         upper_element = cache.mortars.neighbor_ids[2, mortar]
@@ -983,8 +1007,126 @@ function prolong2mortars!(cache, u,
     return nothing
 end
 
+function prolong2mortars!(cache, u::AbstractArray,
+                          mesh::TreeMesh{2}, equations,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM)
+    @threaded for mortar in eachmortar(dg, cache)
+        large_element = cache.mortars.neighbor_ids[3, mortar]
+        upper_element = cache.mortars.neighbor_ids[2, mortar]
+        lower_element = cache.mortars.neighbor_ids[1, mortar]
+
+        # Copy solution small to small in entropy variables
+        if cache.mortars.large_sides[mortar] == 1 # -> small elements on right side
+            if cache.mortars.orientations[mortar] == 1
+                # L2 mortars in x-direction
+                for l in eachnode(dg)
+                    u_upper_node = get_node_vars(u, equations, dg, 1, l, upper_element)
+                    u_lower_node = get_node_vars(u, equations, dg, 1, l, lower_element)
+                    v_upper_node = cons2entropy(u_upper_node, equations)
+                    v_lower_node = cons2entropy(u_lower_node, equations)
+                    for v in eachvariable(equations)
+                        cache.mortars.u_upper[2, v, l, mortar] = v_upper_node[v]
+                        cache.mortars.u_lower[2, v, l, mortar] = v_lower_node[v]
+                    end
+                end
+            else
+                # L2 mortars in y-direction
+                for l in eachnode(dg)
+                    u_upper_node = get_node_vars(u, equations, dg, l, 1, upper_element)
+                    u_lower_node = get_node_vars(u, equations, dg, l, 1, lower_element)
+                    v_upper_node = cons2entropy(u_upper_node, equations)
+                    v_lower_node = cons2entropy(u_lower_node, equations)
+                    for v in eachvariable(equations)
+                        cache.mortars.u_upper[2, v, l, mortar] = v_upper_node[v]
+                        cache.mortars.u_lower[2, v, l, mortar] = v_lower_node[v]
+                    end
+                end
+            end
+        else # large_sides[mortar] == 2 -> small elements on left side
+            if cache.mortars.orientations[mortar] == 1
+                # L2 mortars in x-direction
+                for l in eachnode(dg)
+                    u_upper_node = get_node_vars(u, equations, dg, nnodes(dg), l,
+                                                 upper_element)
+                    u_lower_node = get_node_vars(u, equations, dg, nnodes(dg), l,
+                                                 lower_element)
+                    v_upper_node = cons2entropy(u_upper_node, equations)
+                    v_lower_node = cons2entropy(u_lower_node, equations)
+                    for v in eachvariable(equations)
+                        cache.mortars.u_upper[1, v, l, mortar] = v_upper_node[v]
+                        cache.mortars.u_lower[1, v, l, mortar] = v_lower_node[v]
+                    end
+                end
+            else
+                # L2 mortars in y-direction
+                for l in eachnode(dg)
+                    u_upper_node = get_node_vars(u, equations, dg, l, nnodes(dg),
+                                                 upper_element)
+                    u_lower_node = get_node_vars(u, equations, dg, l, nnodes(dg),
+                                                 lower_element)
+                    v_upper_node = cons2entropy(u_upper_node, equations)
+                    v_lower_node = cons2entropy(u_lower_node, equations)
+                    for v in eachvariable(equations)
+                        cache.mortars.u_upper[1, v, l, mortar] = v_upper_node[v]
+                        cache.mortars.u_lower[1, v, l, mortar] = v_lower_node[v]
+                    end
+                end
+            end
+        end
+
+        # Convert the large element face to entropy variables, then interpolate
+        u_buffer = cache.u_threaded[Threads.threadid()]
+        if cache.mortars.large_sides[mortar] == 1 # -> large element on left side
+            leftright = 1
+            if cache.mortars.orientations[mortar] == 1
+                u_large = view(u, :, nnodes(dg), :, large_element)
+            else
+                u_large = view(u, :, :, nnodes(dg), large_element)
+            end
+        else # large_sides[mortar] == 2 -> large element on right side
+            leftright = 2
+            if cache.mortars.orientations[mortar] == 1
+                u_large = view(u, :, 1, :, large_element)
+            else
+                u_large = view(u, :, :, 1, large_element)
+            end
+        end
+        for l in eachnode(dg)
+            u_node = get_node_vars(u_large, equations, dg, l)
+            v_node = cons2entropy(u_node, equations)
+            set_node_vars!(u_buffer, v_node, equations, dg, l)
+        end
+        element_solutions_to_mortars!(cache.mortars, mortar_l2, leftright, mortar,
+                                      u_buffer)
+    end
+
+    # Convert interpolated entropy variables back to conserved variables
+    @threaded for mortar in eachmortar(dg, cache)
+        for l in eachnode(dg)
+            v_upper_ll, v_upper_rr = get_surface_node_vars(cache.mortars.u_upper,
+                                                           equations, dg, l, mortar)
+            u_upper_ll = entropy2cons(v_upper_ll, equations)
+            u_upper_rr = entropy2cons(v_upper_rr, equations)
+            v_lower_ll, v_lower_rr = get_surface_node_vars(cache.mortars.u_lower,
+                                                           equations, dg, l, mortar)
+            u_lower_ll = entropy2cons(v_lower_ll, equations)
+            u_lower_rr = entropy2cons(v_lower_rr, equations)
+            for v in eachvariable(equations)
+                cache.mortars.u_upper[1, v, l, mortar] = u_upper_ll[v]
+                cache.mortars.u_upper[2, v, l, mortar] = u_upper_rr[v]
+                cache.mortars.u_lower[1, v, l, mortar] = u_lower_ll[v]
+                cache.mortars.u_lower[2, v, l, mortar] = u_lower_rr[v]
+            end
+        end
+    end
+
+    return nothing
+end
+
 @inline function element_solutions_to_mortars!(mortars,
-                                               mortar_l2::LobattoLegendreMortarL2,
+                                               mortar_l2::Union{LobattoLegendreMortarL2,
+                                                                LobattoLegendreMortarEntropy},
                                                leftright, mortar,
                                                u_large::AbstractArray{<:Any, 2})
     multiply_dimensionwise!(view(mortars.u_upper, leftright, :, :, mortar),
@@ -997,7 +1139,8 @@ end
 function calc_mortar_flux!(surface_flux_values,
                            mesh::TreeMesh{2},
                            have_nonconservative_terms::False, equations,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,
+                                            LobattoLegendreMortarEntropy},
                            surface_integral, dg::DG, cache)
     @unpack surface_flux = surface_integral
     @unpack u_lower, u_upper, orientations = cache.mortars
@@ -1034,7 +1177,8 @@ end
 function calc_mortar_flux!(surface_flux_values,
                            mesh::TreeMesh{2},
                            have_nonconservative_terms::True, equations,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,
+                                            LobattoLegendreMortarEntropy},
                            surface_integral, dg::DG, cache)
     surface_flux, nonconservative_flux = surface_integral.surface_flux
     @unpack u_lower, u_upper, orientations, large_sides = cache.mortars
@@ -1164,7 +1308,8 @@ end
 
 @inline function mortar_fluxes_to_elements!(surface_flux_values,
                                             mesh::TreeMesh{2}, equations,
-                                            mortar_l2::LobattoLegendreMortarL2,
+                                            mortar_l2::Union{LobattoLegendreMortarL2,
+                                                             LobattoLegendreMortarEntropy},
                                             dg::DGSEM, cache,
                                             mortar, fstar_primary_upper,
                                             fstar_primary_lower,

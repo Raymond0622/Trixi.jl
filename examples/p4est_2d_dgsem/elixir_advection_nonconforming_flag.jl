@@ -1,5 +1,6 @@
 using OrdinaryDiffEqLowStorageRK
 using Trixi
+using Revise
 
 ###############################################################################
 # semidiscretization of the linear advection equation
@@ -8,7 +9,8 @@ advection_velocity = (0.2, -0.7)
 equations = LinearScalarAdvectionEquation2D(advection_velocity)
 
 # Create DG solver with polynomial degree = 4 and (local) Lax-Friedrichs/Rusanov flux as surface flux
-solver = DGSEM(polydeg = 4, surface_flux = flux_lax_friedrichs)
+solver = DGSEM(polydeg = 4, surface_flux = flux_lax_friedrichs, 
+    mortar=MortarEntropy(4))
 
 # Deformed rectangle that looks like a waving flag,
 # lower and upper faces are sinus curves, left and right are vertical lines.
@@ -79,4 +81,15 @@ callbacks = CallbackSet(summary_callback, analysis_callback, save_solution,
 # OrdinaryDiffEq's `solve` method evolves the solution in time and executes the passed callbacks
 sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
             dt = 1.0, # solve needs some value here but it will be overwritten by the stepsize_callback
-            ode_default_options()..., callback = callbacks);
+            saveat=0.01, ode_default_options()..., callback = callbacks);
+
+ent = []
+
+for u in sol.u
+    uu = parent(sol.u)
+    push!(ent, entropy(uu, equations))
+end
+
+using Plots
+
+plot(sol.t, ent)

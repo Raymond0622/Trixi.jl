@@ -645,7 +645,7 @@ end
 # Create mortar container and initialize mortar data in `elements`.
 function init_mortars(cell_ids, mesh::TreeMesh2D,
                       elements::TreeElementContainer2D,
-                      ::LobattoLegendreMortarL2)
+                      ::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy})
     # Initialize containers
     n_mortars = count_required_mortars(mesh, cell_ids)
     mortars = TreeL2MortarContainer2D{eltype(elements)}(n_mortars, nvariables(elements),
@@ -1051,7 +1051,7 @@ end
 # Create MPI mortar container and initialize MPI mortar data in `elements`.
 function init_mpi_mortars(cell_ids, mesh::TreeMesh2D,
                           elements::TreeElementContainer2D,
-                          ::LobattoLegendreMortarL2)
+                          ::Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy})
     # Initialize containers
     n_mpi_mortars = count_required_mpi_mortars(mesh, cell_ids)
     mpi_mortars = TreeMPIL2MortarContainer2D{eltype(elements)}(n_mpi_mortars,

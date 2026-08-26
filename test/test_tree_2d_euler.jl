@@ -29,6 +29,21 @@ EXAMPLES_DIR = joinpath(examples_dir(), "tree_2d_dgsem")
     @test_allocations(Trixi.rhs!, semi, sol, 1000)
 end
 
+@trixi_testset "elixir_euler_source_terms_nonconforming.jl (MortarL2 vs MortarEntropy)" begin
+    using Trixi: convergence_test
+    elixir = joinpath(EXAMPLES_DIR, "elixir_euler_source_terms_nonconforming.jl")
+
+    eocs_l2, _ = convergence_test(@__MODULE__, elixir, 2; tspan = (0.0, 0.2))
+    mean_l2 = Trixi.calc_mean_convergence(eocs_l2)
+    @test all(eoc -> isapprox(eoc, 4.0; atol = 0.5), mean_l2[:l2])
+
+    eocs_ent, _ = convergence_test(@__MODULE__, elixir, 2;
+                                   tspan = (0.0, 0.2),
+                                   mortar_type = MortarEntropy)
+    mean_ent = Trixi.calc_mean_convergence(eocs_ent)
+    @test all(eoc -> isapprox(eoc, 4.0; atol = 0.5), mean_ent[:l2])
+end
+
 @trixi_testset "elixir_euler_convergence_pure_fv.jl" begin
     @test_trixi_include(joinpath(EXAMPLES_DIR, "elixir_euler_convergence_pure_fv.jl"),
                         l2=[

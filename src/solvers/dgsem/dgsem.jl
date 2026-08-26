@@ -67,9 +67,13 @@ function DGSEM(; RealT = Float64,
                basis_type = LobattoLegendreBasis,
                surface_flux = flux_central,
                surface_integral = SurfaceIntegralWeakForm(surface_flux),
-               volume_integral = VolumeIntegralWeakForm())
+               volume_integral = VolumeIntegralWeakForm(),
+               mortar = nothing)
     basis = basis_type(RealT, polydeg)
-    return DGSEM(basis, surface_integral, volume_integral)
+    if isnothing(mortar)
+        mortar = MortarL2(basis)
+    end
+    return DGSEM(basis, surface_integral, volume_integral, mortar)
 end
 
 @inline polydeg(dg::DGSEM) = polydeg(dg.basis)
