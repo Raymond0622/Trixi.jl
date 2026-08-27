@@ -291,6 +291,12 @@ function (analysis_callback::AnalysisCallback)(u_ode, du_ode, integrator, semi)
     #        release, just delete this analysis quantity from the callback.
     # Source: https://github.com/JuliaLang/julia/blob/b540315cb4bd91e6f3a3e4ab8129a58556947628/base/timing.jl#L86-L97
     memory_use = Base.gc_live_bytes() / 2^20 # bytes -> MiB
+    device_memory_use = trixi_device_memory_use(trixi_backend(u_ode))
+    if device_memory_use !== nothing
+        device_memory_use /= 2^20 # bytes -> MiB
+    else
+        device_memory_use = 0.0
+    end
 
     @trixi_timeit timer() "analyze solution" begin
         # General information
@@ -316,7 +322,9 @@ function (analysis_callback::AnalysisCallback)(u_ode, du_ode, integrator, semi)
                     "               " *
                     " alloc'd memory: " * @sprintf("%14.3f MiB", memory_use))
         mpi_println(" #elements:      " *
-                    @sprintf("% 14d", nelementsglobal(mesh, solver, cache)))
+                    @sprintf("% 14d", nelementsglobal(mesh, solver, cache)) *
+                    "               " *
+                    " device memory:  " * @sprintf("%14.3f MiB", device_memory_use))
 
         # Level information (only for AMR and/or non-uniform `TreeMesh`es)
         print_level_information(integrator.opts.callback, mesh, solver, cache)
@@ -358,7 +366,7 @@ function (analysis_callback::AnalysisCallback)(u_ode, du_ode, integrator, semi)
     end
 
     # avoid re-evaluating possible FSAL stages
-    u_modified!(integrator, false)
+    derivative_discontinuity!(integrator, false)
 
     # Reset performance measurements
     analysis_callback.start_time_last_analysis = time_ns()
@@ -638,6 +646,27 @@ function analyze(quantity::typeof(enstrophy), du, u, t,
     return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
                    cache, cache_parabolic)
 end
+function analyze(quantity::typeof(solenodial_dissipation), du, u, t,
+                 semi::SemidiscretizationHyperbolicParabolic)
+    mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
+    equations_parabolic = semi.equations_parabolic
+    cache_parabolic = semi.cache_parabolic
+    # We do not apply `enstrophy` directly here because we might later have different `quantity`s
+    # that we wish to integrate, which can share this routine.
+    return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
+                   cache, cache_parabolic)
+end
+function analyze(quantity::typeof(dilatational_dissipation), du, u, t,
+                 semi::SemidiscretizationHyperbolicParabolic)
+    mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
+    equations_parabolic = semi.equations_parabolic
+    cache_parabolic = semi.cache_parabolic
+    # We do not apply `enstrophy` directly here because we might later have different `quantity`s
+    # that we wish to integrate, which can share this routine.
+    return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
+                   cache, cache_parabolic)
+end
+
 function analyze(quantity::typeof(enstrophy), du, u, t,
                  semi::SemidiscretizationArtificialViscosity)
     mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
@@ -648,6 +677,27 @@ function analyze(quantity::typeof(enstrophy), du, u, t,
     return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
                    cache, cache_parabolic)
 end
+function analyze(quantity::typeof(solenodial_dissipation), du, u, t,
+                 semi::SemidiscretizationArtificialViscosity)
+    mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
+    equations_parabolic = semi.equations_parabolic
+    cache_parabolic = semi.cache_parabolic
+
+    return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
+                   cache, cache_parabolic)
+end
+
+function analyze(quantity::typeof(dilatational_dissipation), du, u, t,
+                 semi::SemidiscretizationArtificialViscosity)
+    mesh, equations, solver, cache = mesh_equations_solver_cache(semi)
+    equations_parabolic = semi.equations_parabolic
+    cache_parabolic = semi.cache_parabolic
+
+    return analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
+                   cache, cache_parabolic)
+end
+
+
 function analyze(quantity, du, u, t, mesh, equations, equations_parabolic, solver,
                  cache, cache_parabolic)
     return integrate(quantity, u, mesh, equations, equations_parabolic, solver, cache,
@@ -681,6 +731,16 @@ pretty_form_ascii(::typeof(cross_helicity)) = "v_dot_B"
 pretty_form_utf(::typeof(enstrophy)) = "∑enstrophy"
 pretty_form_ascii(::typeof(enstrophy)) = "enstrophy"
 
+function kinetic_energy_dissipation end
+pretty_form_utf(::typeof(kinetic_energy_dissipation)) = "∑ke_dissipation"
+pretty_form_ascii(::typeof(kinetic_energy_dissipation)) = "ke_dissipation"
+
+pretty_form_utf(::typeof(solenodial_dissipation)) = "sole_dissipation"
+pretty_form_ascii(::typeof(solenodial_dissipation)) = "sole_dissipation"
+
+pretty_form_utf(::typeof(dilatational_dissipation)) = "dila_dissipation"
+pretty_form_ascii(::typeof(dilatational_dissipation)) = "dila_dissipation"
+
 pretty_form_utf(::Val{:l2_divb}) = "L2 ∇⋅B"
 pretty_form_ascii(::Val{:l2_divb}) = "l2_divb"
 
@@ -693,7 +753,9 @@ end # @muladd
 
 # specialized implementations specific to some solvers
 include("analysis_dg1d.jl")
+include("analysis_blockfv_1d.jl")
 include("analysis_dg2d.jl")
+include("analysis_blockfv_2d.jl")
 include("analysis_surface_integral.jl")
 include("analysis_dg2d_parallel.jl")
 include("analysis_dg3d.jl")

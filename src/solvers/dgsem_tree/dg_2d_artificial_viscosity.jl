@@ -1,32 +1,22 @@
 @muladd begin
     function create_cache(mesh, artificial_viscosity::EntropyCorrectionArtificialViscosity,
                           dg::DG, cache, RealT, uEltype)
+        
         coefficients = zeros(real(dg), nelements(dg, cache))
         svv_coefficients = zeros(real(dg), nelements(dg, cache))
-        norm_coefficients = zero(real(dg))
-        norm_svv_coefficients = zero(real(dg))
         norm_residuals = zero(real(dg))
 
         ## create element filtered flux and transform gradients
         ## this does not create the whole mesh variables to save memory
         ## we reuse memory
-        tot_nodes = nnodes(dg)^ndims(mesh)
-        nvars = nvariables(artificial_viscosity.equations_artificial_viscosity)
-        filtered_gradients_x = Array{uEltype, 2}(undef, tot_nodes, nvars)
-        filtered_gradients_y = Array{uEltype, 2}(undef, tot_nodes, nvars)
-        filtered_gradients_z = Array{uEltype, 2}(undef, tot_nodes, nvars)
+        n_nodes = nnodes(dg)
+        n_vars = nvariables(artificial_viscosity.equations_artificial_viscosity)
+        n_elements = nelements(dg, cache)
 
-        filtered_flux_parabolic_x = Array{uEltype, 2}(undef, tot_nodes, nvars)
-        filtered_flux_parabolic_y = Array{uEltype, 2}(undef, tot_nodes, nvars)
-        filtered_flux_parabolic_z = Array{uEltype, 2}(undef, tot_nodes, nvars)
-        filtered_gradients = (filtered_gradients_x, 
-            filtered_gradients_y, filtered_gradients_z)
-        filtered_flux_parabolic = (filtered_flux_parabolic_x, 
-            filtered_gradients_y, filtered_gradients_z)
-            
-        cache = (; coefficients, 
-            filtered_flux_parabolic, filtered_gradients, 
-            norm_coefficients, norm_svv_coefficients, norm_residuals)
+        sensor = Array{uEltype, 5}(undef, n_vars, n_nodes, n_nodes, n_nodes, n_elements)
+        max_coeff = Float64[]
+        #velocity_data = Array{uEltype, 5}(undef, n_vars, n_nodes, n_nodes, n_nodes, n_elements)
+        cache = (; sensor, max_coeff, coefficients, svv_coefficients, norm_residuals)
         return cache
     end
 
@@ -83,22 +73,25 @@
                jacobian_1d
     end
 
-    function calc_ecav_coefficients!(flux_viscous, gradients, entropy_residual,
+    function calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
                                      equations, mesh::TreeMesh{2}, dg, cache)
-        @threaded for element in eachelement(dg, cache)
+        element_v = 0.0;
+        for element in eachelement(dg, cache)
             volume_jacobian_ = volume_jacobian(element, mesh, cache)
 
             # calculate viscous dissipation (ECAV denominator)
             element_viscous_dissipation = zero(real(dg))
             for j in eachnode(dg), i in eachnode(dg)
-                flux_viscous_x_node = get_node_vars(flux_viscous[1], equations, dg, i, j,
-                                                    element)
-                flux_viscous_y_node = get_node_vars(flux_viscous[2], equations, dg, i, j,
-                                                    element)
+                flux_parabolic_x_node = get_node_vars(flux_parabolic[1], equations, dg, i,
+                                                      j,
+                                                      element)
+                flux_parabolic_y_node = get_node_vars(flux_parabolic[2], equations, dg, i,
+                                                      j,
+                                                      element)
                 gradients_x_node = get_node_vars(gradients[1], equations, dg, i, j, element)
                 gradients_y_node = get_node_vars(gradients[2], equations, dg, i, j, element)
-                viscous_dissipation_x = dot(flux_viscous_x_node, gradients_x_node)
-                viscous_dissipation_y = dot(flux_viscous_y_node, gradients_y_node)
+                viscous_dissipation_x = dot(flux_parabolic_x_node, gradients_x_node)
+                viscous_dissipation_y = dot(flux_parabolic_y_node, gradients_y_node)
 
                 weight_ij = dg.basis.weights[i] * dg.basis.weights[j]
                 element_viscous_dissipation = element_viscous_dissipation +
@@ -112,18 +105,23 @@
             # flip the sign to account for the fact that viscous terms are negated by convention in Trixi.jl.
             ecav_coefficient = regularized_ratio(min(0, entropy_residual[element]),
                                                  element_viscous_dissipation)
+            #ecav_coefficient = 0.0
             cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
             for j in eachnode(dg), i in eachnode(dg)
-                flux_viscous_x_node = get_node_vars(flux_viscous[1], equations, dg, i, j,
-                                                    element)
-                flux_viscous_y_node = get_node_vars(flux_viscous[2], equations, dg, i, j,
-                                                    element)
-                set_node_vars!(flux_viscous[1], ecav_coefficient * flux_viscous_x_node,
+                flux_parabolic_x_node = get_node_vars(flux_parabolic[1], equations, dg, i,
+                                                      j,
+                                                      element)
+                flux_parabolic_y_node = get_node_vars(flux_parabolic[2], equations, dg, i,
+                                                      j,
+                                                      element)
+                set_node_vars!(flux_parabolic[1], ecav_coefficient * flux_parabolic_x_node,
                                equations, dg, i, j, element)
-                set_node_vars!(flux_viscous[2], ecav_coefficient * flux_viscous_y_node,
+                set_node_vars!(flux_parabolic[2], ecav_coefficient * flux_parabolic_y_node,
                                equations, dg, i, j, element)
             end
+            element_v = max(element_v, element_viscous_dissipation)
         end
+        push!(cache.artificial_viscosity.max_coeff, maximum(cache.artificial_viscosity.coefficients))
         return nothing
     end
 
@@ -134,13 +132,16 @@
                                        source_terms::Source,
                                        dg::DG, solver_parabolic, cache,
                                        cache_parabolic) where {Source}
+        backend = trixi_backend(u)
 
         # Reset du
-        @trixi_timeit timer() "reset ∂u/∂t" reset_du!(du, dg, cache)
+        @trixi_timeit_ext backend timer() "reset ∂u/∂t" begin
+            reset_du!(du, dg, cache)
+        end
 
         # Calculate volume integral
-        @trixi_timeit timer() "volume integral" begin
-            calc_volume_integral!(du, u, mesh,
+        @trixi_timeit_ext backend timer() "volume integral" begin
+            calc_volume_integral!(backend, du, u, mesh,
                                   have_nonconservative_terms(equations), equations,
                                   dg.volume_integral, dg, cache)
         end
@@ -151,27 +152,26 @@
             entropy_residual[element] = calc_volume_entropy_residual(du, u, element, mesh,
                                                                      equations, dg, cache)
         end
-
         # Prolong solution to interfaces
-        @trixi_timeit timer() "prolong2interfaces" begin
-            prolong2interfaces!(cache, u, mesh, equations, dg)
+        @trixi_timeit_ext backend timer() "prolong2interfaces" begin
+            prolong2interfaces!(backend, cache, u, mesh, equations, dg)
         end
 
         # Calculate interface fluxes
-        @trixi_timeit timer() "interface flux" begin
-            calc_interface_flux!(cache.elements.surface_flux_values, mesh,
+        @trixi_timeit_ext backend timer() "interface flux" begin
+            calc_interface_flux!(backend, cache.elements.surface_flux_values, mesh,
                                  have_nonconservative_terms(equations), equations,
                                  dg.surface_integral, dg, cache)
         end
 
         # Prolong solution to boundaries
-        @trixi_timeit timer() "prolong2boundaries" begin
-            prolong2boundaries!(cache, u, mesh, equations, dg)
+        @trixi_timeit_ext backend timer() "prolong2boundaries" begin
+            prolong2boundaries!(backend, cache, u, mesh, equations, dg)
         end
 
         # Calculate boundary fluxes
-        @trixi_timeit timer() "boundary flux" begin
-            calc_boundary_flux!(cache, t, boundary_conditions, mesh, equations,
+        @trixi_timeit_ext backend timer() "boundary flux" begin
+            calc_boundary_flux!(backend, cache, t, boundary_conditions, mesh, equations,
                                 dg.surface_integral, dg)
         end
 
@@ -189,27 +189,29 @@
         # end
 
         # Calculate surface integrals
-        @trixi_timeit timer() "surface integral" begin
-            calc_surface_integral!(du, u, mesh, equations,
+        @trixi_timeit_ext backend timer() "surface integral" begin
+            calc_surface_integral!(backend, du, u, mesh, equations,
                                    dg.surface_integral, dg, cache)
         end
 
         # @trixi_timeit timer() "transform variables" begin
-        #     (; u_transformed, flux_viscous, gradients) = cache_parabolic.viscous_container
+        #     (; u_transformed, flux_parabolic, gradients) = cache_parabolic.parabolic_container
         #     transform_variables!(u_transformed, u, mesh, equations_artificial_viscosity, dg,
         #                          solver_parabolic, cache)
         # end
 
-        @trixi_timeit timer() "calculate viscous fluxes" begin
-            (; u_transformed, flux_viscous, gradients) = cache_parabolic.viscous_container
-            calc_viscous_fluxes!(flux_viscous, gradients, u_transformed, mesh,
-                                 equations_artificial_viscosity, dg, cache)
+        @trixi_timeit timer() "calculate parabolic fluxes" begin
+            (; u_transformed, flux_parabolic, gradients) = cache_parabolic.parabolic_container
+            calc_parabolic_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
+                                   equations_artificial_viscosity, dg, cache)
         end
 
-        calc_ecav_coefficients!(flux_viscous, gradients, entropy_residual, equations, mesh,
+        calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual, equations,
+                                mesh,
                                 dg, cache)
 
-        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_viscous, u, mesh,
+        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
+                                                                 mesh,
                                                                  equations_parabolic,
                                                                  boundary_conditions_parabolic, # TODO: hacky pass in parabolic equations
                                                                  #  equations_artificial_viscosity, BoundaryConditionDoNothing(), 
@@ -217,10 +219,12 @@
                                                                  cache, t)
 
         # Apply Jacobian from mapping to reference element
-        @trixi_timeit timer() "Jacobian" apply_jacobian!(du, mesh, equations, dg, cache)
+        @trixi_timeit_ext backend timer() "Jacobian" begin
+            apply_jacobian!(backend, du, mesh, equations, dg, cache)
+        end
 
         # Calculate source terms
-        @trixi_timeit timer() "source terms" begin
+        @trixi_timeit_ext backend timer() "source terms" begin
             calc_sources!(du, u, t, source_terms, equations, dg, cache)
         end
 
@@ -233,14 +237,17 @@
                            source_terms::Source,
                            dg::DG, parabolic_scheme, cache, cache_parabolic) where {Source}
         (; u_transformed, flux_parabolic, gradients) = cache_parabolic.parabolic_container
+        backend = trixi_backend(u)
         # Reset du
-        @trixi_timeit timer() "reset ∂u/∂t" set_zero!(du, dg, cache)
+        @trixi_timeit_ext backend timer() "reset ∂u/∂t" begin
+            set_zero!(du, dg, cache)
+        end
 
         # ========= hyperbolic part ============
 
         # Calculate volume integral
-        @trixi_timeit timer() "volume integral" begin
-            calc_volume_integral!(nothing, du, u, mesh,
+        @trixi_timeit_ext backend timer() "volume integral" begin
+            calc_volume_integral!(backend, du, u, mesh,
                                   have_nonconservative_terms(equations), equations,
                                   dg.volume_integral, dg, cache)
         end
@@ -251,27 +258,28 @@
             entropy_residual[element] = calc_volume_entropy_residual(du, u, element, mesh,
                                                                      equations, dg, cache)
         end
+        #push!(cache.artificial_viscosity.max_coeff, maximum(-min.(0.0, entropy_residual)))
 
         # Prolong solution to interfaces
-        @trixi_timeit timer() "prolong2interfaces" begin
-            prolong2interfaces!(nothing, cache, u, mesh, equations, dg)
+        @trixi_timeit_ext backend timer() "prolong2interfaces" begin
+            prolong2interfaces!(backend, cache, u, mesh, equations, dg)
         end
 
         # Calculate interface fluxes
-        @trixi_timeit timer() "interface flux" begin
-            calc_interface_flux!(nothing, cache.elements.surface_flux_values, mesh,
+        @trixi_timeit_ext backend timer() "interface flux" begin
+            calc_interface_flux!(backend, cache.elements.surface_flux_values, mesh,
                                  have_nonconservative_terms(equations), equations,
                                  dg.surface_integral, dg, cache)
         end
 
         # Prolong solution to boundaries
-        @trixi_timeit timer() "prolong2boundaries" begin
-            prolong2boundaries!(cache, u, mesh, equations, dg)
+        @trixi_timeit_ext backend timer() "prolong2boundaries" begin
+            prolong2boundaries!(backend, cache, u, mesh, equations, dg)
         end
 
         # Calculate boundary fluxes
-        @trixi_timeit timer() "boundary flux" begin
-            calc_boundary_flux!(cache, t, boundary_conditions, mesh, equations,
+        @trixi_timeit_ext backend timer() "boundary flux" begin
+            calc_boundary_flux!(backend, cache, t, boundary_conditions, mesh, equations,
                                 dg.surface_integral, dg)
         end
 
@@ -288,8 +296,8 @@
         end
 
         # Calculate surface integrals
-        @trixi_timeit timer() "surface integral" begin
-            calc_surface_integral!(nothing, du, u, mesh, equations,
+        @trixi_timeit_ext backend timer() "surface integral" begin
+            calc_surface_integral!(backend, du, u, mesh, equations,
                                    dg.surface_integral, dg, cache)
         end
 
@@ -300,6 +308,7 @@
             transform_variables!(u_transformed, u, mesh, equations_parabolic,
                                  dg, cache)
         end
+        #push!(cache.artificial_viscosity.max_coeff, maximum(u_transformed))
 
         # Compute the gradients of the transformed variables
         @trixi_timeit timer() "calculate gradient" begin
@@ -307,25 +316,38 @@
                            equations_parabolic, boundary_conditions_parabolic,
                            dg, parabolic_scheme, cache)
         end
+        #push!(cache.artificial_viscosity.max_coeff, maximum(gradients[1]))
 
         # ========= AV specific part ============
 
-        @trixi_timeit timer() "calculate AV viscous fluxes" begin
+        @trixi_timeit timer() "calculate AV parabolic fluxes" begin
             calc_parabolic_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
                                    equations_artificial_viscosity, dg, cache)
         end
 
         calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual, equations,
-                                mesh, dg, cache)
+                                mesh,
+                                dg, cache)
+
+        # # TODO: accumulate into flux_parabolic instead
+        # # accumulate the AV term
+        # @trixi_timeit timer() "calc AV divergence" calc_divergence!(du, flux_parabolic, u, mesh, 
+        #                                                             equations_artificial_viscosity, 
+        #                                                             boundaryConditionDoNothing(), 
+        #                                                             dg, parabolic_scheme, cache, t)
 
         # ======== physical parabolic part ==========
 
         # accumulate physical viscous fluxes
         @trixi_timeit timer() "calculate viscous fluxes" begin
             accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
+            accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
                                   equations_parabolic, dg, cache)
         end
 
+        # TODO: fix BCs for equations_artificial_viscosity
+        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
+                                                                 mesh,
         @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
                                                                  mesh,
                                                                  equations_parabolic,
@@ -334,12 +356,13 @@
                                                                  cache, t)
 
         # Apply Jacobian from mapping to reference element
-        @trixi_timeit timer() "Jacobian" apply_jacobian!(nothing, du, mesh, equations, dg,
-                                                         cache)
+        @trixi_timeit_ext backend timer() "Jacobian" begin
+            apply_jacobian!(backend, du, mesh, equations, dg, cache)
+        end
 
         # Calculate source terms
-        @trixi_timeit timer() "source terms" begin
-            calc_sources!(du, u, t, source_terms, equations, dg, cache)
+        @trixi_timeit_ext backend timer() "source terms" begin
+            calc_sources!(backend, du, u, t, source_terms, equations, dg, cache)
         end
 
         return nothing
@@ -368,7 +391,6 @@
                                            equations_parabolic)
                 flux_viscous_node_y = flux(u_node, (gradients_1_node, gradients_2_node), 2,
                                            equations_parabolic)
-
                 # flip sign for Trixi's parabolic convention
                 add_to_node_vars!(flux_viscous_x, -flux_viscous_node_x, equations_parabolic,
                                   dg,

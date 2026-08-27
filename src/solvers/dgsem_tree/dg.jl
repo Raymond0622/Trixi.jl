@@ -16,7 +16,8 @@ end
 end
 
 # Dimension agnostic, i.e., valid for all 1D, 2D, and 3D `TreeMesh`es.
-function calc_boundary_flux!(cache, t, boundary_condition::BoundaryConditionPeriodic,
+function calc_boundary_flux!(backend::Nothing, cache, t,
+                             boundary_condition::BoundaryConditionPeriodic,
                              mesh::TreeMesh, equations, surface_integral, dg::DG)
     @assert isempty(eachboundary(dg, cache))
 
@@ -43,6 +44,7 @@ include("subcell_finite_volume_O2.jl")
 
 # 1D DG implementation
 include("dg_1d.jl")
+include("dg_1d_artificial_viscosity.jl")
 include("dg_1d_parabolic.jl")
 
 # 2D DG implementation

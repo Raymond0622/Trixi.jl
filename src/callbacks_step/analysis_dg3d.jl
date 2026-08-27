@@ -179,7 +179,7 @@ function calc_error_norms(func, u, t, analyzer,
     # Set up data structures
     l2_error = zero(func(get_node_vars(u, equations, dg, 1, 1, 1, 1), equations))
     linf_error = copy(l2_error)
-    total_volume = zero(real(mesh))
+    total_volume = zero(eltype(weights)) * zero(eltype(inverse_jacobian))
 
     # Iterate over all elements for error calculations
     for element in eachelement(dg, cache)
@@ -405,7 +405,7 @@ function integrate_via_indices(func::Func, ::Nothing, u,
 
     # Initialize integral with zeros of the right shape
     integral = zero(func(u, 1, 1, 1, 1, equations, dg, args...))
-    total_volume = zero(real(mesh))
+    total_volume = zero(eltype(weights)) * zero(eltype(inverse_jacobian))
 
     # Use quadrature to numerically integrate over entire domain
     @batch reduction=((+, integral), (+, total_volume)) for element in eachelement(dg,
@@ -444,7 +444,8 @@ function integrate_via_indices(func::Func, backend::Backend, u,
     integral0 = zero(Base.promote_op(func, typeof(u), Int, Int, Int, Int,
                                      typeof(equations), typeof(dg),
                                      map(typeof, args)...))
-    init = neutral = (integral0, zero(real(mesh)))
+    volume0 = zero(eltype(weights)) * zero(eltype(inverse_jacobian))
+    init = neutral = (integral0, volume0)
 
     # Use quadrature to numerically integrate over entire domain
     num_elements = nelements(dg, cache)
@@ -499,6 +500,22 @@ function integrate(func::Func, u,
                                           element)
         return func(u_local, (gradients_1_local, gradients_2_local, gradients_3_local),
                     equations_parabolic)
+    end
+end
+
+function analyze(::typeof(kinetic_energy_dissipation), du, u, t,
+                 mesh::Union{TreeMesh{3}, StructuredMesh{3}, P4estMesh{3},
+                             T8codeMesh{3}},
+                 equations, dg::Union{DGSEM, FDSBP}, cache;
+                   normalize = true) where {Func}
+    integrate_via_indices(u, mesh, equations, dg, cache;
+                          normalize = normalize) do u, i, j, k, element, equations, dg
+        u_local = get_node_vars(u, equations, dg, i, j, k, element)
+        du_local = get_node_vars(du, equations, dg, i, j, k, element)
+        u1, u2, u3 = velocity(u_local, equations)
+        n_vel = u1 * u1 + u2 * u2 + u3 * u3
+        return -(u1 * du_local[2] + u2 * du_local[3] + u3 * du_local[4]) + 0.5 * (n_vel) * du_local[1]
+        #return func(u_local, du_local, equations)
     end
 end
 
