@@ -70,15 +70,15 @@ periodicity = (false, false)
 # @inline mu() = 5e-3 # Re = 200
 # @inline mu() = 2e-3  # Re = 500
 # @inline mu() = 0.0013333333333333333 # Re = 750
-@inline mu() = 0.0
+@inline mu() = 1e-3
 
-coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
-coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
+# coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
+# coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
 # # initial_condition = initial_condition_blast_wave
 # # tspan = (0.0, 1.5)
-initial_condition = initial_condition_kelvin_helmholtz_instability
-tspan = (0.0, 5.0)
-periodicity = (true, true)
+# initial_condition = initial_condition_kelvin_helmholtz_instability
+# tspan = (0.0, 5.0)
+# periodicity = (true, true)
 
 equations = CompressibleEulerEquations2D(1.4)
 equations_parabolic = CompressibleNavierStokesDiffusion2D(equations, mu = mu(),
@@ -103,7 +103,7 @@ dg = DGSEM(polydeg = 3, surface_flux = FluxLaxFriedrichs(max_abs_speed),
 # dg = DGSEM(basis, surface_flux, volume_integral)
 
 # Create a uniformly refined mesh with periodic boundaries
-initial_refinement_level = 5
+initial_refinement_level = 6
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
                 periodicity = periodicity, n_cells_max = 400_000)
