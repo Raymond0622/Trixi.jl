@@ -68,7 +68,7 @@ coordinates_min = (0.0, 0.0)
 coordinates_max = (1.0, 1.0)
 
 mesh = TreeMesh(coordinates_min, coordinates_max,
-                initial_refinement_level = 4,
+                initial_refinement_level = 3,
                 n_cells_max = 100_000,
                 periodicity = false)
 
@@ -135,7 +135,7 @@ semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
 ###############################################################################
 ## ODE solvers, callbacks etc.
 
-tspan = (0.0, 0.25)
+tspan = (0.0, 0.2)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
@@ -167,3 +167,11 @@ callbacks = CallbackSet(summary_callback,
 sol = solve(ode, SSPRK54();
             dt = 1, # solve needs some value here but it will be overwritten by the stepsize_callback
             save_everystep = false, callback = callbacks);
+
+ using Plots
+pd = PlotData2D(sol)
+plot(getmesh(pd), title = "mesh")
+savefig("mesh.png")
+plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
+# plot!(getmesh(pd))
+# savefig("rho.png")

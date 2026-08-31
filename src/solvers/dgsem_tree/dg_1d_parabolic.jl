@@ -91,28 +91,6 @@ function rhs_parabolic!(du, u, t, mesh::TreeMesh{1},
     return nothing
 end
 
-function calc_volume_entropy_residual(du, u, element, mesh::TreeMesh{1}, equations, dg,
-                                      cache)
-    # calculate volume integral
-    volume_integral_du_entropy = zero(real(dg))
-    for i in eachnode(dg)
-        u_node = get_node_vars(u, equations, dg, i, element)
-        du_node = get_node_vars(du, equations, dg, i, element)
-        volume_integral_du_entropy = volume_integral_du_entropy +
-                                     dot(cons2entropy(u_node, equations), du_node) *
-                                     dg.basis.weights[i]
-    end
-
-    # calculate surface integral
-    u_left = get_node_vars(u, equations, dg, 1, element)
-    u_right = get_node_vars(u, equations, dg, nnodes(dg), element)
-    surface_integral_entropy_potential = entropy_potential(u_right, SVector(1.0),
-                                                           equations) +
-                                         entropy_potential(u_left, SVector(-1.0),
-                                                           equations)
-    return volume_integral_du_entropy + surface_integral_entropy_potential
-end
-
 function calc_divergence!(du, flux_parabolic, u, mesh::TreeMesh{1}, equations_parabolic,
                           boundary_conditions_parabolic, dg, parabolic_scheme, cache, t)
     # Calculate volume integral

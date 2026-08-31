@@ -338,16 +338,13 @@
 
         # ======== physical parabolic part ==========
 
-        # accumulate physical viscous fluxes
+        # accumulate physical viscous fluxes    
         @trixi_timeit timer() "calculate viscous fluxes" begin
-            accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
             accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
                                   equations_parabolic, dg, cache)
         end
 
         # TODO: fix BCs for equations_artificial_viscosity
-        @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
-                                                                 mesh,
         @trixi_timeit timer() "calc divergence" calc_divergence!(du, flux_parabolic, u,
                                                                  mesh,
                                                                  equations_parabolic,

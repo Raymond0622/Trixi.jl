@@ -10,6 +10,7 @@ include("interpolation.jl")
 include("l2projection.jl")
 include("basis_lobatto_legendre.jl")
 include("basis_gauss_legendre.jl")
+include("mortar_p_1to1.jl")
 
 """
     DGSEM(; RealT=Float64,

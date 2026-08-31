@@ -187,6 +187,13 @@ function rhs!(du_ode, u_ode, semi::SemidiscretizationCoupled, t)
         end
     end
 
+    @trixi_timeit timer() "p-mortar fluxes" begin
+        foreach(semi.semis) do semi_
+            return calc_coupled_p_mortar_fluxes!(semi_.boundary_conditions, u_ode, semi,
+                                                 semi_)
+        end
+    end
+
     # Call rhs! for each semidiscretization
     foreach_enumerate(semi.semis) do (i, semi_)
         u_loc = get_system_u_ode(u_ode, i, semi)
@@ -518,6 +525,84 @@ function (boundary_condition::BoundaryConditionCoupled)(u_inner, orientation, di
     return flux
 end
 
+"""
+    BoundaryConditionCoupledPMortar(other_semi_index, indices, uEltype, coupling_converter,
+                                    basis_own, basis_other; entropy_variables = false)
+
+Like [`BoundaryConditionCoupled`](@ref), but the adjacent faces may use different
+surface quadrature (1:1 p-nonconforming). Neighbor traces are stored on their
+native nodes. The Riemann flux is evaluated on a Gauss mortar quadrature that
+differs from both faces, then L²-projected back onto this element's original
+nodes via [`MortarP1to1`](@ref).
+
+Currently implemented for 2D [`StructuredMesh`](@ref) / [`StructuredMeshView`](@ref).
+Both coupled solvers should use the same `surface_flux`. The Riemann problem uses
+contravariant face normals (same scaling as interior structured interfaces).
+On affine Cartesian mappings the mortar is globally conservative.
+
+# Arguments
+- `other_semi_index`, `indices`, `uEltype`, `coupling_converter`: same as
+  [`BoundaryConditionCoupled`](@ref)
+- `basis_own`: SBP basis of this semidiscretization
+- `basis_other`: SBP basis of the neighbor semidiscretization
+- `entropy_variables`: if `true`, interpolate traces in entropy variables
+  (flux is still computed in conservative variables and L²-projected)
+
+!!! warning "Experimental code"
+    This is an experimental feature and can change any time.
+"""
+mutable struct BoundaryConditionCoupledPMortar{NDIMS,
+                                               other_semi_index, NDIMST2M1,
+                                               uEltype <: Real, Indices,
+                                               CouplingConverter, Mortar}
+    # Neighbor state on the neighbor's native face nodes:
+    # [variable, nodes_other, cell]
+    u_boundary               :: Array{uEltype, NDIMST2M1}
+    # Riemann flux L²-projected onto this element's face nodes:
+    # [variable, nodes_own, cell]
+    flux_projected           :: Array{uEltype, NDIMST2M1}
+    const other_orientation  :: Int
+    const indices            :: Indices
+    own_is_left              :: Bool
+    const coupling_converter :: CouplingConverter
+    const mortar             :: Mortar
+    const entropy_variables  :: Bool
+
+    function BoundaryConditionCoupledPMortar(other_semi_index, indices, uEltype,
+                                             coupling_converter,
+                                             basis_own, basis_other;
+                                             entropy_variables = false)
+        NDIMS = length(indices)
+        @assert NDIMS == 2 "BoundaryConditionCoupledPMortar is currently only implemented for 2D"
+
+        u_boundary = Array{uEltype, NDIMS * 2 - 1}(undef,
+                                                   ntuple(_ -> 0, NDIMS * 2 - 1))
+        flux_projected = Array{uEltype, NDIMS * 2 - 1}(undef,
+                                                       ntuple(_ -> 0, NDIMS * 2 - 1))
+
+        if indices[1] in (:begin, :end)
+            other_orientation = 1
+        else
+            other_orientation = 2
+        end
+
+        mortar = MortarP1to1(basis_own, basis_other)
+
+        return new{NDIMS, other_semi_index, NDIMS * 2 - 1, uEltype, typeof(indices),
+                   typeof(coupling_converter), typeof(mortar)}(u_boundary,
+                                                               flux_projected,
+                                                               other_orientation,
+                                                               indices, false,
+                                                               coupling_converter,
+                                                               mortar,
+                                                               entropy_variables)
+    end
+end
+
+function Base.eltype(boundary_condition::BoundaryConditionCoupledPMortar)
+    return eltype(boundary_condition.u_boundary)
+end
+
 function allocate_coupled_boundary_conditions(semi::AbstractSemidiscretization)
     n_boundaries = 2 * ndims(semi)
     mesh, equations, solver, _ = mesh_equations_solver_cache(semi)
@@ -552,6 +637,31 @@ function allocate_coupled_boundary_condition(boundary_condition::BoundaryConditi
                                                              nvariables(equations),
                                                              nnodes(dg),
                                                              cell_size)
+end
+
+function allocate_coupled_boundary_condition(boundary_condition::BoundaryConditionCoupledPMortar{2},
+                                             direction, mesh, equations, dg::DGSEM)
+    if direction in (1, 2)
+        cell_size = size(mesh, 2)
+    else
+        cell_size = size(mesh, 1)
+    end
+
+    uEltype = eltype(boundary_condition)
+    n_own = nnodes_own(boundary_condition.mortar)
+    n_other = nnodes_other(boundary_condition.mortar)
+    boundary_condition.u_boundary = Array{uEltype, 3}(undef,
+                                                      nvariables(equations),
+                                                      n_other,
+                                                      cell_size)
+    boundary_condition.flux_projected = Array{uEltype, 3}(undef,
+                                                          nvariables(equations),
+                                                          n_own,
+                                                          cell_size)
+    # Even directions (x_pos, y_pos) are the left state of the Riemann problem.
+    boundary_condition.own_is_left = iseven(direction)
+
+    return nothing
 end
 
 # Don't do anything for other BCs than BoundaryConditionCoupled
@@ -612,6 +722,16 @@ function copy_to_coupled_boundary!(boundary_condition::BoundaryConditionCoupled{
     # We need indices starting at 1 for the handling of `i_cell` etc.
     Base.require_one_based_indexing(cells)
 
+    # 1:1 p-nonconforming coupling: interpolate the neighbor face from its LGL
+    # nodes onto this side's LGL nodes. Same-degree faces keep a direct copy.
+    nnodes_own = nnodes(solver_own)
+    nnodes_other = nnodes(solver_other)
+    interpolate_face = nnodes_own != nnodes_other
+    vandermonde = interpolate_face ?
+                  polynomial_interpolation_matrix(solver_other.basis.nodes,
+                                                  solver_own.basis.nodes) :
+                  nothing
+
     @threaded for i in eachindex(cells)
         cell = cells[i]
         i_cell = i_cell_start + (i - 1) * i_cell_step
@@ -619,20 +739,107 @@ function copy_to_coupled_boundary!(boundary_condition::BoundaryConditionCoupled{
 
         i_node = i_node_start
         j_node = j_node_start
-        element_id = linear_indices[i_cell, j_cell]
+        element_other = linear_indices[i_cell, j_cell]
 
-        for element_id in eachnode(solver_other)
+        if interpolate_face
+            nvars = size(u_boundary, 1)
+            u_src = zeros(eltype(u_boundary), nvars, nnodes_other)
+            for k in eachnode(solver_other)
+                x_other = get_node_coords(node_coordinates_other, equations_other,
+                                          solver_other, i_node, j_node, element_other)
+                u_node_other = get_node_vars(u_other, equations_other, solver_other,
+                                             i_node, j_node, element_other)
+                u_node_converted = coupling_converter(x_other, u_node_other,
+                                                      equations_other, equations_own)
+                for v in eachindex(u_node_converted)
+                    u_src[v, k] = u_node_converted[v]
+                end
+                i_node += i_node_step
+                j_node += j_node_step
+            end
+            for k_own in 1:nnodes_own
+                for v in 1:nvars
+                    acc = zero(eltype(u_boundary))
+                    for k_src in 1:nnodes_other
+                        acc += vandermonde[k_own, k_src] * u_src[v, k_src]
+                    end
+                    u_boundary[v, k_own, cell] = acc
+                end
+            end
+        else
+            for node in eachnode(solver_other)
+                x_other = get_node_coords(node_coordinates_other, equations_other,
+                                          solver_other, i_node, j_node, element_other)
+                u_node_other = get_node_vars(u_other, equations_other, solver_other,
+                                             i_node, j_node, element_other)
+                u_node_converted = coupling_converter(x_other, u_node_other,
+                                                      equations_other, equations_own)
+
+                for v in eachindex(u_node_converted)
+                    u_boundary[v, node, cell] = u_node_converted[v]
+                end
+
+                i_node += i_node_step
+                j_node += j_node_step
+            end
+        end
+    end
+
+    return nothing
+end
+
+# Copy neighbor traces on their native quadrature (no interpolation).
+function copy_to_coupled_boundary!(boundary_condition::BoundaryConditionCoupledPMortar{2,
+                                                                                       other_semi_index},
+                                   u_ode, semi_coupled, semi) where {other_semi_index}
+    @unpack indices = boundary_condition
+    @unpack coupling_converter, u_boundary = boundary_condition
+
+    mesh_own, equations_own, solver_own, cache_own = mesh_equations_solver_cache(semi)
+    other_semi = semi_coupled.semis[other_semi_index]
+    mesh_other, equations_other, solver_other, cache_other = mesh_equations_solver_cache(other_semi)
+
+    node_coordinates_other = cache_other.elements.node_coordinates
+    u_ode_other = get_system_u_ode(u_ode, other_semi_index, semi_coupled)
+    u_other = wrap_array(u_ode_other, mesh_other, equations_other, solver_other,
+                         cache_other)
+
+    linear_indices = LinearIndices(size(mesh_other))
+
+    if boundary_condition.other_orientation == 1
+        cells = axes(mesh_other, 2)
+    else
+        cells = axes(mesh_other, 1)
+    end
+
+    node_index_range = eachnode(solver_other)
+    i_node_start, i_node_step = index_to_start_step_2d(indices[1], node_index_range)
+    j_node_start, j_node_step = index_to_start_step_2d(indices[2], node_index_range)
+
+    i_cell_start, i_cell_step = index_to_start_step_2d(indices[1], axes(mesh_other, 1))
+    j_cell_start, j_cell_step = index_to_start_step_2d(indices[2], axes(mesh_other, 2))
+
+    Base.require_one_based_indexing(cells)
+
+    @threaded for i in eachindex(cells)
+        cell = cells[i]
+        i_cell = i_cell_start + (i - 1) * i_cell_step
+        j_cell = j_cell_start + (i - 1) * j_cell_step
+
+        i_node = i_node_start
+        j_node = j_node_start
+        element_other = linear_indices[i_cell, j_cell]
+
+        for node in eachnode(solver_other)
             x_other = get_node_coords(node_coordinates_other, equations_other,
-                                      solver_other,
-                                      i_node, j_node, linear_indices[i_cell, j_cell])
-            u_node_other = get_node_vars(u_other, equations_other, solver_other, i_node,
-                                         j_node, linear_indices[i_cell, j_cell])
+                                      solver_other, i_node, j_node, element_other)
+            u_node_other = get_node_vars(u_other, equations_other, solver_other,
+                                         i_node, j_node, element_other)
             u_node_converted = coupling_converter(x_other, u_node_other,
-                                                  equations_other,
-                                                  equations_own)
+                                                  equations_other, equations_own)
 
-            for i in eachindex(u_node_converted)
-                u_boundary[i, element_id, cell] = u_node_converted[i]
+            for v in eachindex(u_node_converted)
+                u_boundary[v, node, cell] = u_node_converted[v]
             end
 
             i_node += i_node_step
@@ -641,6 +848,172 @@ function copy_to_coupled_boundary!(boundary_condition::BoundaryConditionCoupled{
     end
 
     return nothing
+end
+
+# Don't do anything for BCs that are not 1:1 p-mortars
+function calc_coupled_p_mortar_fluxes!(boundary_condition, u_ode, semi_coupled, semi)
+    return nothing
+end
+
+function calc_coupled_p_mortar_fluxes!(u_ode, semi_coupled, semi, i, n_boundaries,
+                                       boundary_condition, boundary_conditions...)
+    calc_coupled_p_mortar_fluxes!(boundary_condition, u_ode, semi_coupled, semi)
+    if i < n_boundaries
+        calc_coupled_p_mortar_fluxes!(u_ode, semi_coupled, semi, i + 1, n_boundaries,
+                                      boundary_conditions...)
+    end
+end
+
+function calc_coupled_p_mortar_fluxes!(boundary_conditions::Union{Tuple, NamedTuple},
+                                       u_ode, semi_coupled, semi)
+    return calc_coupled_p_mortar_fluxes!(u_ode, semi_coupled, semi, 1,
+                                         length(boundary_conditions),
+                                         boundary_conditions...)
+end
+
+function calc_coupled_p_mortar_fluxes!(boundary_condition::BoundaryConditionCoupledPMortar{2,
+                                                                                           other_semi_index},
+                                       u_ode, semi_coupled, semi) where {other_semi_index}
+    @unpack mortar, u_boundary, flux_projected, other_orientation, own_is_left = boundary_condition
+    @unpack entropy_variables = boundary_condition
+
+    mesh_own, equations, solver_own, cache_own = mesh_equations_solver_cache(semi)
+
+    own_semi_index = find_semi_index(semi, semi_coupled)
+    u_ode_own = get_system_u_ode(u_ode, own_semi_index, semi_coupled)
+    u_own = wrap_array(u_ode_own, mesh_own, equations, solver_own, cache_own)
+    contravariant_vectors = cache_own.elements.contravariant_vectors
+
+    surface_flux = solver_own.surface_integral.surface_flux
+    if surface_flux isa Tuple
+        error("BoundaryConditionCoupledPMortar does not support nonconservative terms")
+    end
+
+    own_indices = own_face_indices(other_orientation, own_is_left)
+    linear_indices = LinearIndices(size(mesh_own))
+
+    if other_orientation == 1
+        cells = axes(mesh_own, 2)
+    else
+        cells = axes(mesh_own, 1)
+    end
+
+    node_index_range = eachnode(solver_own)
+    i_node_start, i_node_step = index_to_start_step_2d(own_indices[1], node_index_range)
+    j_node_start, j_node_step = index_to_start_step_2d(own_indices[2], node_index_range)
+    i_cell_start, i_cell_step = index_to_start_step_2d(own_indices[1], axes(mesh_own, 1))
+    j_cell_start, j_cell_step = index_to_start_step_2d(own_indices[2], axes(mesh_own, 2))
+
+    Base.require_one_based_indexing(cells)
+
+    n_own = nnodes_own(mortar)
+    n_other = nnodes_other(mortar)
+    n_mortar = nnodes_mortar(mortar)
+    nvars = nvariables(equations)
+
+    @threaded for i in eachindex(cells)
+        cell = cells[i]
+        i_cell = i_cell_start + (i - 1) * i_cell_step
+        j_cell = j_cell_start + (i - 1) * j_cell_step
+
+        i_node = i_node_start
+        j_node = j_node_start
+        element_own = linear_indices[i_cell, j_cell]
+
+        u_face_own = zeros(eltype(flux_projected), nvars, n_own)
+        u_face_other = zeros(eltype(flux_projected), nvars, n_other)
+        u_mortar_own = zeros(eltype(flux_projected), nvars, n_mortar)
+        u_mortar_other = zeros(eltype(flux_projected), nvars, n_mortar)
+        f_mortar = zeros(eltype(flux_projected), nvars, n_mortar)
+        # Contravariant normal on the own LGL face; interpolated to the mortar
+        # so the Riemann flux matches interior structured-mesh scaling (f · Ja).
+        n_dims = ndims(equations)
+        ja_face = zeros(eltype(flux_projected), n_dims, n_own)
+        ja_mortar = zeros(eltype(flux_projected), n_dims, n_mortar)
+
+        for node in 1:n_own
+            u_node = get_node_vars(u_own, equations, solver_own,
+                                   i_node, j_node, element_own)
+            if entropy_variables
+                u_node = cons2entropy(u_node, equations)
+            end
+            for v in eachvariable(equations)
+                u_face_own[v, node] = u_node[v]
+            end
+            ja = get_contravariant_vector(other_orientation, contravariant_vectors,
+                                          i_node, j_node, element_own)
+            for d in 1:n_dims
+                ja_face[d, node] = ja[d]
+            end
+            i_node += i_node_step
+            j_node += j_node_step
+        end
+
+        for node in 1:n_other
+            u_node = SVector(ntuple(v -> u_boundary[v, node, cell], Val(nvars)))
+            if entropy_variables
+                u_node = cons2entropy(u_node, equations)
+            end
+            for v in eachvariable(equations)
+                u_face_other[v, node] = u_node[v]
+            end
+        end
+
+        multiply_dimensionwise_face!(u_mortar_own, mortar.vandermonde_own, u_face_own)
+        multiply_dimensionwise_face!(u_mortar_other, mortar.vandermonde_other,
+                                     u_face_other)
+        multiply_dimensionwise_face!(ja_mortar, mortar.vandermonde_own, ja_face)
+
+        for k in 1:n_mortar
+            u_own_k = SVector(ntuple(v -> u_mortar_own[v, k], Val(nvars)))
+            u_other_k = SVector(ntuple(v -> u_mortar_other[v, k], Val(nvars)))
+            if entropy_variables
+                u_own_k = entropy2cons(u_own_k, equations)
+                u_other_k = entropy2cons(u_other_k, equations)
+            end
+            normal_k = SVector(ntuple(d -> ja_mortar[d, k], Val(2)))
+
+            if own_is_left
+                flux = surface_flux(u_own_k, u_other_k, normal_k, equations)
+            else
+                flux = surface_flux(u_other_k, u_own_k, normal_k, equations)
+            end
+
+            for v in eachvariable(equations)
+                f_mortar[v, k] = flux[v]
+            end
+        end
+
+        # L²-project mortar flux onto this element's original face quadrature
+        for node in 1:n_own
+            for v in eachvariable(equations)
+                acc = zero(eltype(flux_projected))
+                for k in 1:n_mortar
+                    acc += mortar.project_own[node, k] * f_mortar[v, k]
+                end
+                flux_projected[v, node, cell] = acc
+            end
+        end
+    end
+
+    return nothing
+end
+
+@inline function own_face_indices(other_orientation, own_is_left)
+    if other_orientation == 1
+        return own_is_left ? (:end, :i_forward) : (:begin, :i_forward)
+    else
+        return own_is_left ? (:i_forward, :end) : (:i_forward, :begin)
+    end
+end
+
+function find_semi_index(semi, semi_coupled::SemidiscretizationCoupled)
+    for i in eachsystem(semi_coupled)
+        if semi_coupled.semis[i] === semi
+            return i
+        end
+    end
+    error("semidiscretization not found in SemidiscretizationCoupled")
 end
 
 ################################################################################
@@ -732,6 +1105,30 @@ end
                                                                               (flux[v] +
                                                                                0.5f0 *
                                                                                noncons_flux[v])
+    end
+
+    return nothing
+end
+
+@inline function calc_boundary_flux_by_direction!(surface_flux_values, t,
+                                                  orientation,
+                                                  boundary_condition::BoundaryConditionCoupledPMortar,
+                                                  mesh::Union{StructuredMesh,
+                                                              StructuredMeshView},
+                                                  have_nonconservative_terms::False,
+                                                  equations,
+                                                  surface_integral, dg::DG, cache,
+                                                  direction, node_indices,
+                                                  surface_node_indices, element)
+    @unpack inverse_jacobian = cache.elements
+    cell_indices = get_boundary_indices(element, orientation, mesh)
+    sign_jacobian = sign(inverse_jacobian[node_indices..., element])
+
+    for v in eachvariable(equations)
+        surface_flux_values[v, surface_node_indices..., direction, element] = sign_jacobian *
+                                                                              boundary_condition.flux_projected[v,
+                                                                                                                surface_node_indices...,
+                                                                                                                cell_indices...]
     end
 
     return nothing

@@ -1,207 +1,182 @@
-using OrdinaryDiffEqLowStorageRK
 using OrdinaryDiffEqSSPRK
+using LinearAlgebra: I
 using Trixi
+using Revise
 
 ###############################################################################
-# semidiscretization of the ideal compressible Navier-Stokes equations
+# 2D Riemann problem with ECAV on a checkerboard nonconforming TreeMesh.
+# Uses MortarEntropy. Physical NS viscosity is off (`mu = 0`); no SVV.
+
+gamma = 1.4
+equations = CompressibleEulerEquations2D(gamma)
 
 prandtl_number() = 0.73
-
-function initial_condition_kelvin_helmholtz_instability(x, t,
-                                                        equations::CompressibleEulerEquations2D)
-    # change discontinuity to tanh
-    # typical resolution 128^2, 256^2
-    # domain size is [-1,+1]^2
-    slope = 15
-    B = tanh(slope * x[2] + 7.5) - tanh(slope * x[2] - 7.5)
-    rho = 0.5 + 0.75 * B
-    v1 = 0.5 * (B - 1)
-    v2 = 0.1 * sin(2 * pi * x[1])
-    p = 1.0
-    return prim2cons(SVector(rho, v1, v2, p), equations)
-end
-
-function initial_condition_blast_wave(x, t, equations::CompressibleEulerEquations2D)
-    RealT = eltype(x)
-    inicenter = SVector(0.25, 0.25)
-    x_norm = x[1] - inicenter[1]
-    y_norm = x[2] - inicenter[2]
-    r = sqrt(x_norm^2 + y_norm^2)
-    phi = atan(y_norm, x_norm)
-    sin_phi, cos_phi = sincos(phi)
-
-    # Calculate primitive variables
-    r0 = 0.25f0
-    rho = r > r0 ? one(1e-1) : RealT(1.1691)
-    v1 = r > r0 ? zero(RealT) : RealT(0.1882) * cos_phi
-    v2 = r > r0 ? zero(RealT) : RealT(0.1882) * sin_phi
-    # p = r > 0.25f0 ? RealT(1.0E-2) : RealT(1.245)
-    p = r > r0 ? RealT(1e-1) : RealT(1.245)
-
-    return prim2cons(SVector(rho, v1, v2, p), equations)
-end
-
-function initial_condition_daru(x, t, equations)
-    RealT = eltype(x)
-    v1 = zero(RealT)
-    v2 = zero(RealT)
-
-    rho_rr = 120.0
-    # rho_rr = 60.0
-
-    rho = x[1] > 0.5f0 ? 1.2 : rho_rr
-    p = x[1] > 0.5f0 ? 1.2 / equations.gamma : rho_rr / equations.gamma
-    # rho = x[1] > 0.5f0 ? 1.2 : 24.0
-    # p = x[1] > 0.5f0 ? 1.2 / equations.gamma : 24.0 / equations.gamma
-    # rho = 59.4 * tanh(-25*(x[1] - 0.5)) + 60.6
-    if abs(x[1] - 0.5f0) < 1e3 * eps()
-        rho = 0.5 * (1.2 + rho_rr)
-    end
-    p = rho / equations.gamma
-
-    return prim2cons(SVector(rho, v1, v2, p), equations)
-end
-
-coordinates_min = (0.0, 0.0) # minimum coordinates (min(x), min(y))
-coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
-tspan = (0.0, 1.0)
-initial_condition = initial_condition_daru
-periodicity = (false, false)
-# @inline mu() = 5e-3 # Re = 200
-# @inline mu() = 2e-3  # Re = 500
-# @inline mu() = 0.0013333333333333333 # Re = 750
-@inline mu() = 1e-3
-
-# coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
-# coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
-# # initial_condition = initial_condition_blast_wave
-# # tspan = (0.0, 1.5)
-# initial_condition = initial_condition_kelvin_helmholtz_instability
-# tspan = (0.0, 5.0)
-# periodicity = (true, true)
-
-equations = CompressibleEulerEquations2D(1.4)
+mu() = 0.0
 equations_parabolic = CompressibleNavierStokesDiffusion2D(equations, mu = mu(),
                                                           Prandtl = prandtl_number(),
                                                           gradient_variables = GradientVariablesEntropy())
+solver_parabolic = Trixi.ParabolicFormulationBassiRebay1()
 
-dg = DGSEM(polydeg = 3, surface_flux = FluxLaxFriedrichs(max_abs_speed),
-           volume_integral = VolumeIntegralWeakForm())
-#         #    volume_integral = VolumeIntegralFluxDifferencing(flux_shima_etal))
+"""
+    initial_condition_kelvin_helmholtz_instability(x, t, equations::CompressibleEulerEquations2D)
 
-# surface_flux = FluxLaxFriedrichs(max_abs_speed)
-# basis = LobattoLegendreBasis(3)
-# indicator_sc = IndicatorHennemannGassner(equations, basis,
-#                                          alpha_max = 0.25,
-#                                          alpha_min = 0.001,
-#                                          alpha_smooth = true,
-#                                          variable = density_pressure)
-# volume_integral = VolumeIntegralShockCapturingHG(indicator_sc;
-#                                                  volume_flux_dg = flux_shima_etal,
-#                                                 #  volume_flux_dg = flux_central,
-#                                                  volume_flux_fv = surface_flux)           
-# dg = DGSEM(basis, surface_flux, volume_integral)
+A version of the classical Kelvin-Helmholtz instability based on
+- Andrés M. Rueda-Ramírez, Gregor J. Gassner (2021)
+  A Subcell Finite Volume Positivity-Preserving Limiter for DGSEM Discretizations
+  of the Euler Equations
+  [arXiv: 2102.06017](https://arxiv.org/abs/2102.06017)
+"""
+function initial_condition_riemann1(coords, t, equations::CompressibleEulerEquations2D)
+    x, y = coords
 
-# Create a uniformly refined mesh with periodic boundaries
-initial_refinement_level = 6
+    if 0 < x < 0.5 
+        if 0 < y < 0.5
+            rho = 0.8;
+            v1 = 0
+            v2 = 0;
+            p = 1
+        else 
+            rho = 1
+            v1 = 3 / sqrt(17)
+            v2 = 0
+            p = 1
+        end
+    else 
+        if 0 < y < 0.5
+            rho = 1
+            v1 = 0
+            v2 = 3/sqrt(17)
+            p = 1
+        else
+            rho = 17 * 0.03125
+            v1 = 0
+            v2 = 0;
+            p = 0.4;
+        end
+    end
+
+    return prim2cons(SVector(rho, v1, v2, p), equations);
+end
+
+function initial_condition_kelvin_helmholtz_instability(x, t, equations)
+
+    # A = .8
+    A = 3 / 7
+    rho1 = 0.5 * one(A) # recover original with A = 3/7
+    rho2 = rho1 * (1 + A) / (1 - A)
+
+    # B is a discontinuous function with value 1 for -.5 <= x <= .5 and 0 elsewhere
+    slope = 15
+    B = 0.5 * (tanh(slope * x[2] + 7.5) - tanh(slope * x[2] - 7.5))
+
+    rho = rho1 + B * (rho2 - rho1)  # rho ∈ [rho_1, rho_2]
+    v1 = B - 0.5                    # v1  ∈ [-.5, .5]
+    v2 = 0.1 * sin(2 * pi * x[1]) 
+    # v2 = 0.1 * sin(2 * pi * x[1]) * (1 + .01 * sin(pi * x[1]) * sin(pi * x[2])) # symmetry breaking
+    p = 1.0
+    return prim2cons(SVector(rho, v1, v2, p), equations)
+end
+initial_condition = initial_condition_kelvin_helmholtz_instability
+initial_condition = initial_condition_riemann1
+
+polydeg = 3
+basis = LobattoLegendreBasis(polydeg)
+surface_flux = FluxLaxFriedrichs(max_abs_speed)
+volume_flux = flux_central
+
+indicator_ec = IndicatorEntropyCorrection(equations, basis)
+volume_integral_default = VolumeIntegralWeakForm()
+#volume_integral_default = VolumeIntegralFluxDifferencing(volume_flux)
+volume_integral_entropy_stable = VolumeIntegralPureLGLFiniteVolume(surface_flux)
+volume_integral = VolumeIntegralAdaptive(indicator_ec,
+                                         volume_integral_default,
+                                         volume_integral_entropy_stable)
+volume_integral = VolumeIntegralWeakForm()
+volume_integral = VolumeIntegralFluxDifferencing(flux_ranocha)
+
+indicator_sc = IndicatorHennemannGassner(equations, basis,
+                                         alpha_max = 1.0,
+                                         alpha_min = 0.001,
+                                         alpha_smooth = true,
+                                         variable = first)
+volume_flux = flux_central
+surface_flux = flux_lax_friedrichs
+
+volume_integral = VolumeIntegralShockCapturingHG(indicator_sc;
+                                                 volume_flux_dg = volume_flux,
+                                                 volume_flux_fv = surface_flux)
+
+solver = DGSEM(basis, surface_flux, volume_integral, MortarL2(basis))
+
+
+coordinates_min = (0.0, 0.0)
+coordinates_max = (1.0, 1.0)
+initial_refinement_level = 5
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
-                periodicity = periodicity, n_cells_max = 400_000)
+                n_cells_max = 400_000, periodicity = true)
 
-# BC types
-boundary_condition_noslip_wall = BoundaryConditionNavierStokesWall(NoSlip((x, t, equations_parabolic) -> (0.0,
-                                                                                                          0.0)),
-                                                                   Adiabatic((x, t, equations_parabolic) -> 0.0))
-
-# define inviscid boundary conditions
-boundary_conditions_hyperbolic = (; x_neg = boundary_condition_slip_wall,
-                                  x_pos = boundary_condition_slip_wall,
-                                  y_neg = boundary_condition_slip_wall,
-                                  y_pos = boundary_condition_slip_wall)
-
-# define viscous boundary conditions
-boundary_conditions_parabolic = (; x_neg = boundary_condition_noslip_wall,
-                                 x_pos = boundary_condition_noslip_wall,
-                                 y_neg = boundary_condition_noslip_wall,
-                                 y_pos = boundary_condition_noslip_wall)
-
-# solver_parabolic = ViscousFormulationBassiRebay1()
-solver_parabolic = ParabolicFormulationLocalDG()
-N = 3
-basis = LobattoLegendreBasis(3)
-nodes = Trixi.get_nodes(basis)
-VDM, _ = Trixi.vandermonde_legendre(nodes, N)
-filter = [((i - 1) / N)^2 for i in 1:(N + 1)]
-if all(mesh.tree.periodicity .== true)
-    semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
-                                                 VDM, filter,
-                                                 initial_condition, dg;
-                                                 combine_rhs = Trixi.True(),
-                                                 solver_parabolic = solver_parabolic)
-    # semi = SemidiscretizationHyperbolicParabolic(mesh, (equations, equations_parabolic),
-    #                                              initial_condition, dg;
-    #                                              solver_parabolic = solver_parabolic)
-
-else
-    semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
-                                                 VDM, filter,
-                                                 initial_condition, dg;
-                                                 combine_rhs = Trixi.True(),
-                                                 solver_parabolic = solver_parabolic,
-                                                 boundary_conditions = (boundary_conditions_hyperbolic,
-                                                                        boundary_conditions_parabolic))
-
-    #     semi = SemidiscretizationHyperbolicParabolic(mesh, (equations, equations_parabolic),
-    #                                                 initial_condition, dg;
-    #                                                 solver_parabolic = solver_parabolic,
-    #                                                 boundary_conditions = (boundary_conditions_hyperbolic, 
-    #                                                                         boundary_conditions_parabolic))
+# Checkerboard refinement: every other leaf is refined so neighboring cells differ
+# by one level. Every coarse–fine face is then a 2:1 mortar.
+dx = (coordinates_max[1] - coordinates_min[1]) / 2^initial_refinement_level
+cells_to_refine = Int[]
+for cell_id in Trixi.leaf_cells(mesh.tree)
+    x, y = Trixi.cell_coordinates(mesh.tree, cell_id)
+    ix = round(Int, (x - coordinates_min[1]) / dx - 0.5)
+    iy = round(Int, (y - coordinates_min[2]) / dx - 0.5)
+    if iseven(ix + iy)
+        push!(cells_to_refine, cell_id)
+    end
 end
+Trixi.refine!(mesh.tree, cells_to_refine)
+
+# Identity filter: required by the merged constructor, unused for ECAV-only.
+VDM = Matrix{Float64}(I, polydeg + 1, polydeg + 1)
+filter = ones(polydeg + 1)
+
+semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
+                                             initial_condition, solver;
+                                             VDM = VDM, filter = filter,
+                                             ecav_choice = :ecav,
+                                             combine_rhs = Trixi.True(),
+                                             solver_parabolic = solver_parabolic)
+
+semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
+    boundary_conditions=Trixi.boundary_condition_periodic)
 
 ###############################################################################
 # ODE solvers, callbacks etc.
 
-# Create ODE problem with time span `tspan`
+tspan = (0.0, 0.25)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
-alive_callback = AliveCallback(alive_interval = 100)
-callbacks = CallbackSet(summary_callback, alive_callback)
-# analysis_interval = 1000
-# analysis_callback = AnalysisCallback(semi, interval = analysis_interval)
-# callbacks = CallbackSet(summary_callback, alive_callback, analysis_callback) #, amr_callback)
+analysis_interval = 500
+analysis_callback = AnalysisCallback(semi, interval = analysis_interval,
+                                     extra_analysis_integrals = (entropy,))
+alive_callback = AliveCallback(analysis_interval = analysis_interval)
+save_solution = SaveSolutionCallback(interval = 500,
+                                     save_initial_solution = true,
+                                     save_final_solution = true,
+                                     solution_variables = cons2prim)
+callbacks = CallbackSet(summary_callback, analysis_callback, alive_callback,
+                        save_solution)
 
 ###############################################################################
 # run the simulation
 
-solver = SSPRK43()
-
-sol = solve(ode, solver; abstol = 1e-6, reltol = 1e-4, # dt = 1e-8,
+sol = solve(ode, SSPRK43();
+            abstol = 1e-8, reltol = 1e-6, saveat=0.01,
             ode_default_options()..., callback = callbacks)
 
-using JLD2
-#@save "DaruTenaudRe1000_polydeg_3_elements_512.jld2" sol
-#@save "DaruTenaudRe1000_polydeg_$(Trixi.polydeg(dg.basis))_elements_$(2^initial_refinement_level).jld2" sol
-# @save "DaruTenaudRe1000_polydeg_$(Trixi.polydeg(dg.basis))_elements_$(2^initial_refinement_level)_shock_capturing_amax_p5.jld2" sol
-
 using Plots
-# plot(PlotData2D(sol)["rho"])
+pd = PlotData2D(sol)
 
-u = Trixi.wrap_array(sol.u[end], semi)
-T = [Trixi.temperature(get_node_vars(u, equations, dg, i, j, elements),
-                       equations_parabolic)
-     for i in eachnode(dg), j in eachnode(dg), elements in eachelement(dg, semi.cache)]
-plot(ScalarPlotData2D(T, semi))
-plot!(clims = (0.4, 1.2))
-plot!(xlims = (0.4, 1.0), ylims = (0, 0.25))
+plot(getmesh(pd), title = "checkerboard mesh")
+savefig("mesh.png")
+plot(pd["rho"], clims=(0.4, 2.0), title = "rho at t = $(round(sol.t[end]; digits = 3))")
+plot!(getmesh(pd))
+savefig("rho.png")
 
-ECAV_coefficient = [semi.cache.artificial_viscosity.coefficients[elements]
-                    for i in eachnode(dg), j in eachnode(dg),
-                        elements in eachelement(dg, semi.cache)]
-plot(ScalarPlotData2D(ECAV_coefficient, semi))
-plot!(clims = (0, 5e-6))
-plot!(xlims = (0.4, 1.0), ylims = (0, 0.25))
-# plot!(getmesh(PlotData2D(sol)))
-
-# using JLD2
-# @save "DaruTenaudRe1000_polydeg_3_elements_512.jld2" sol
+entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
+plot(sol.t, entropy_integral)

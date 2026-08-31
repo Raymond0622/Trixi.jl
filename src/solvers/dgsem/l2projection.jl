@@ -120,7 +120,6 @@ function calc_reverse_upper(n_nodes, ::Val{:gauss_lobatto}, RealT = Float64)
     # Calculate nodes, weights, and barycentric weights
     nodes, weights = gauss_lobatto_nodes_weights(n_nodes, RealT)
     wbary = barycentric_weights(nodes)
-
     # Calculate projection matrix (actually: discrete L2 projection with errors)
     operator = zeros(RealT, n_nodes, n_nodes)
     for j in 1:n_nodes
@@ -152,3 +151,5 @@ function calc_reverse_lower(n_nodes, ::Val{:gauss_lobatto}, RealT = Float64)
     return operator
 end
 end # @muladd
+
+

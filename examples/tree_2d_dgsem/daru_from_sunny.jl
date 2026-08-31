@@ -4,6 +4,7 @@ using Trixi
 using StartUpDG
 using Plots
 using LinearAlgebra
+using Revise
 
 function changetoStartUpDG(du, cache)
     
@@ -122,10 +123,10 @@ coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
 tspan = (0.0, 1.0)
 initial_condition = initial_condition_daru
 periodicity = (false, false)
-# @inline mu() = 5e-3 # Re = 200
+@inline mu() = 5e-3 # Re = 200
 # @inline mu() = 2e-3  # Re = 500
 # @inline mu() = 0.0013333333333333333 # Re = 750
-@inline mu() = 1e-3 # Re = 1000
+#@inline mu() = 1e-3 # Re = 1000
 
 # coordinates_min = (-1.0, -1.0) # minimum coordinates (min(x), min(y))
 # coordinates_max = (1.0, 1.0) # maximum coordinates (max(x), max(y))
@@ -164,7 +165,7 @@ dg = DGSEM(polydeg = 1, surface_flux = FluxLaxFriedrichs(max_abs_speed),
 # dg = DGSEM(basis, surface_flux, volume_integral)
 
 # Create a uniformly refined mesh with periodic boundaries
-initial_refinement_level = 6
+initial_refinement_level = 7
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
                 periodicity = periodicity, n_cells_max = 400_000)
@@ -311,7 +312,7 @@ anim = @animate for k in eachindex(sol.u)
          color = :grays)
 end
 
-gif(anim, "rho_schlieren_N1daru1024.gif", fps = 10)
+gif(anim, "test.gif", fps = 10)
 
 data = load("DaruTenaudRe1000_polydeg_3_elements_256.jld2");
 sol = data["sol"];

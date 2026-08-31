@@ -254,8 +254,13 @@ end
     MortarEntropy(basis::LobattoLegendreBasis)
     MortarEntropy(polydeg::Integer)
 
-Create a mortar that interpolates in entropy variables using the same L²
-projection operators as `MortarL2`.
+Create a mortar that interpolates traces in entropy variables.
+
+Forward maps are the same LGL interpolations as [`MortarL2`](@ref). The reverse
+(flux) maps use composite Gauss–Lobatto quadrature on the two small faces
+(`Val(:gauss_lobatto)`), not the inexact Gauss L² used by `MortarL2`. That
+matches the SBP surface inner product, which is the mortar analogue of the
+sketched `MortarEC` operators.
 """
 function MortarEntropy(basis::LobattoLegendreBasis)
     RealT = real(basis)
@@ -263,8 +268,8 @@ function MortarEntropy(basis::LobattoLegendreBasis)
 
     forward_upper = calc_forward_upper(nnodes_, RealT)
     forward_lower = calc_forward_lower(nnodes_, RealT)
-    reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss), RealT)
-    reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss), RealT)
+    reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_lobatto), RealT)
+    reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_lobatto), RealT)
 
     return LobattoLegendreMortarEntropy{RealT, nnodes_, typeof(forward_upper),
                                         typeof(reverse_upper)}(forward_upper, forward_lower,

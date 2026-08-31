@@ -285,7 +285,8 @@ export boundary_condition_do_nothing,
        BoundaryConditionNavierStokesWall,
        NoSlip, Slip,
        Adiabatic, Isothermal,
-       BoundaryConditionCoupled, BoundaryConditionCoupledP4est
+       BoundaryConditionCoupled, BoundaryConditionCoupledPMortar,
+       BoundaryConditionCoupledP4est
 
 export initial_condition_convergence_test, source_terms_convergence_test,
        source_terms_lorentz, source_terms_collision_ion_electron,
@@ -330,7 +331,7 @@ export DG,
        IndicatorEntropyCorrection, IndicatorEntropyCorrectionShockCapturingCombined,
        SurfaceIntegralWeakForm, SurfaceIntegralStrongForm,
        SurfaceIntegralUpwind,
-       MortarL2, MortarEntropy
+       MortarL2, MortarEntropy, MortarP1to1
 
 export reconstruction_O2_inner, reconstruction_O2_full,
        reconstruction_constant,
