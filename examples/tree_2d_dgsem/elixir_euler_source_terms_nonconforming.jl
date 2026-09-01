@@ -18,6 +18,7 @@ initial_condition = initial_condition_convergence_test
 # To ensure that every example still runs we specify explicitly `FluxLaxFriedrichs(max_abs_speed_naive)`.
 # We remark, however, that the now default `max_abs_speed` is in general recommended due to compliance with the
 # `StepsizeCallback` (CFL-Condition) and less diffusion.
+
 polydeg = 3
 mortar_type = MortarL2
 volume_flux = flux_ranocha

@@ -57,13 +57,13 @@ function initial_condition_isentropic_vortex(x, t, equations::CompressibleEulerE
 end
 initial_condition = initial_condition_isentropic_vortex
 
-polydeg = 3
+polydeg = 2
 basis = LobattoLegendreBasis(polydeg)
 surface_flux = FluxLaxFriedrichs(max_abs_speed)
 volume_flux = flux_ranocha
 # Default mortar is `MortarL2`. Switch with `trixi_include` / `convergence_test`:
 #   convergence_test(elixir, 4; mortar_type = MortarEntropy)
-mortar_type = MortarEntropy
+mortar_type = MortarL2
 mortar = mortar_type(basis)
 volume_integral = VolumeIntegralFluxDifferencing(volume_flux)
 #volume_integral = VolumeIntegralWeakForm();
@@ -103,6 +103,9 @@ semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabol
                                              combine_rhs = Trixi.True(),
                                              solver_parabolic = solver_parabolic)
 
+semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
+     boundary_conditions=Trixi.boundary_condition_periodic)
+
 ###############################################################################
 # ODE solvers, callbacks etc.
 
@@ -124,13 +127,13 @@ sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
             dt = 1.0, saveat = 0.05,
             ode_default_options()..., callback = callbacks)
 
-# using Plots
-# pd = PlotData2D(sol)
-# plot(getmesh(pd), title = "mesh")
-# savefig("mesh.png")
-# plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
-# plot!(getmesh(pd))
-# savefig("rho.png")
+using Plots
+pd = PlotData2D(sol)
+plot(getmesh(pd), title = "mesh")
+savefig("mesh.png")
+plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
+plot!(getmesh(pd))
+savefig("rho.png")
 
 # anim = @animate for k in eachindex(sol.u)
 #     pd = PlotData2D(sol.u[k], semi)
