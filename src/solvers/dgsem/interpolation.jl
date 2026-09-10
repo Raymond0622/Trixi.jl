@@ -168,7 +168,6 @@ function multiply_dimensionwise!(data_out::AbstractArray{<:Any, 2}, matrix1::Abs
         end
         data_out[v, i] += res
     end
-
     return nothing
 end
 
@@ -177,7 +176,7 @@ function multiply_dimensionwise!(data_out::AbstractArray{<:Any, 3}, matrix::Abst
                                  data_in::AbstractArray{<:Any, 3},
                                  tmp1 = zeros(eltype(data_out), size(data_out, 1),
                                               size(matrix, 1), size(matrix, 2)))
-
+ 
     # Interpolate in x-direction
     # @tullio threads=false tmp1[v, i, j]     = matrix[i, ii] * data_in[v, ii, j]
     @turbo for j in axes(tmp1, 3), i in axes(tmp1, 2), v in axes(tmp1, 1)

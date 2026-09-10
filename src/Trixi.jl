@@ -329,7 +329,8 @@ export DG,
        IndicatorHennemannGassner,
        VolumeIntegralUpwind,
        IndicatorEntropyCorrection, IndicatorEntropyCorrectionShockCapturingCombined,
-       SurfaceIntegralWeakForm, SurfaceIntegralStrongForm,
+       SurfaceIntegralWeakForm, SurfaceIntegralWeakFormGaussQuad,
+       SurfaceIntegralStrongForm,
        SurfaceIntegralUpwind,
        MortarL2, MortarEntropy, MortarP1to1
 

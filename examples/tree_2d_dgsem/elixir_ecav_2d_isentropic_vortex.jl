@@ -1,6 +1,8 @@
 using OrdinaryDiffEqLowStorageRK
 using LinearAlgebra: I
 using Trixi
+using OrdinaryDiffEqSSPRK
+using Revise
 
 ###############################################################################
 # Isentropic vortex with ECAV on a checkerboard nonconforming TreeMesh.
@@ -62,16 +64,32 @@ basis = LobattoLegendreBasis(polydeg)
 surface_flux = FluxLaxFriedrichs(max_abs_speed)
 volume_flux = flux_ranocha
 # Default mortar is `MortarL2`. Switch with `trixi_include` / `convergence_test`:
-#   convergence_test(elixir, 4; mortar_type = MortarEntropy)
-mortar_type = MortarL2
-mortar = mortar_type(basis)
+#   convergence_test(elixir, 4; mortar_type = MortarEntropy, mortar_nodes = "gauss")
+# Use a String (not a Symbol): `trixi_include` would turn `:gauss_lobatto` into
+# the bare name `gauss_lobatto`.
+mortar_type = MortarEntropy
+# "gauss_lobatto" → LGL traces/SAT. "gauss" → Gauss traces + GaussQuad SAT.
+# `MortarL2` always uses LGL SAT (`use_gauss_face` is false).
+mortar_nodes = "gauss_lobatto"
+if mortar_type === MortarEntropy
+    mortar = MortarEntropy(basis; nodes = Symbol(mortar_nodes))
+else
+    mortar = mortar_type(basis)
+end
 volume_integral = VolumeIntegralFluxDifferencing(volume_flux)
 #volume_integral = VolumeIntegralWeakForm();
-solver = DGSEM(basis, surface_flux, volume_integral,
-               mortar)
+use_gauss_face = mortar_type === MortarEntropy && Symbol(mortar_nodes) === :gauss
+if use_gauss_face
+    surface_integral = SurfaceIntegralWeakFormGaussQuad(surface_flux, basis)
+    solver = DGSEM(basis, surface_integral, volume_integral, mortar)
+else
+    solver = DGSEM(basis, surface_flux, volume_integral, mortar)
+end
 
 coordinates_min = (-10.0, -10.0)
 coordinates_max = (10.0, 10.0)
+# Literal so `convergence_test` / `find_assignment` sees an Int, not the
+# symbol from `initial_refinement_level = initial_refinement_level`.
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = 3,
                 n_cells_max = 400_000, periodicity = true)
@@ -96,12 +114,12 @@ Trixi.refine!(mesh.tree, cells_to_refine)
 VDM = Matrix{Float64}(I, polydeg + 1, polydeg + 1)
 filter = ones(polydeg + 1)
 
-semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
-                                             initial_condition, solver;
-                                             VDM = VDM, filter = filter,
-                                             ecav_choice = :ecav,
-                                             combine_rhs = Trixi.True(),
-                                             solver_parabolic = solver_parabolic)
+# semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
+#                                              initial_condition, solver;
+#                                              VDM = VDM, filter = filter,
+#                                              ecav_choice = :ecav,
+#                                              combine_rhs = Trixi.True(),
+#                                              solver_parabolic = solver_parabolic)
 
 semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
      boundary_conditions=Trixi.boundary_condition_periodic)
@@ -109,7 +127,7 @@ semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
 ###############################################################################
 # ODE solvers, callbacks etc.
 
-tspan = (0.0, 3.0)
+tspan = (0.0, 2.0)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
@@ -123,27 +141,22 @@ callbacks = CallbackSet(summary_callback, analysis_callback, alive_callback,
 ###############################################################################
 # run the simulation
 
+# `dt` is overwritten by `StepsizeCallback`. Do not omit that callback with
+# CarpenterKennedy2N54 — a raw `dt = 1` is far too large for this mesh.
 sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
             dt = 1.0, saveat = 0.05,
             ode_default_options()..., callback = callbacks)
 
-using Plots
-pd = PlotData2D(sol)
-plot(getmesh(pd), title = "mesh")
-savefig("mesh.png")
-plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
-plot!(getmesh(pd))
-savefig("rho.png")
+# using Plots
+# pd = PlotData2D(sol)
+# plot(getmesh(pd), title = "mesh")
+# savefig("mesh.png")
+# plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
+# plot!(getmesh(pd))
+# savefig("rho.png")
 
-# anim = @animate for k in eachindex(sol.u)
-#     pd = PlotData2D(sol.u[k], semi)
-#     plot(pd["rho"], clims=(0.96, 1.0), title = "rho, t = $(round(sol.t[k]; digits = 2))")
-#     plot!(getmesh(pd))
-# end
-# gif(anim, "elixir_ecav_2d_isentropic_vortex.gif", fps = 10)
-
-# Domain-integrated entropy at each saved solution time (same quadrature as AnalysisCallback)
-entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
-plot(sol.t, entropy_integral, xlabel = "t", ylabel = "∫ S dV / |Ω|",
-     legend = false, title = "entropy integral")
-savefig("entropy_integral.png")
+# # Domain-integrated entropy at each saved solution time (same quadrature as AnalysisCallback)
+# entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
+# plot(sol.t, entropy_integral, xlabel = "t", ylabel = "∫ S dV / |Ω|",
+#         legend = false, title = "entropy integral")
+# savefig("entropy_integral.png")

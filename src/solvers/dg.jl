@@ -814,6 +814,34 @@ end
 
 SurfaceIntegralWeakForm() = SurfaceIntegralWeakForm(flux_central)
 
+"""
+    SurfaceIntegralWeakFormGaussQuad(surface_flux, basis::LobattoLegendreBasis)
+
+LGL-volume DGSEM surface term with Riemann states interpolated to Gauss nodes.
+`surface_flux_values` store fluxes at those Gauss nodes. The SAT that matches
+the LGL SBP volume is interpolation of `f*` back to LGL, then the standard
+`M^{-1} B` lift (`f^*/ω_N`), not lumped-mass `M^{-1} V^T W_G f^*`.
+"""
+struct SurfaceIntegralWeakFormGaussQuad{SurfaceFlux, RealT,
+                                        MatrixT <: AbstractMatrix{RealT}} <:
+       AbstractSurfaceIntegral
+    surface_flux::SurfaceFlux
+    lobatto2gauss::MatrixT
+    gauss2lobatto::MatrixT
+end
+
+function SurfaceIntegralWeakFormGaussQuad(surface_flux,
+                                          basis)
+    RealT = real(basis)
+    gauss_nodes, _ = gauss_nodes_weights(nnodes(basis), RealT)
+    lobatto2gauss = polynomial_interpolation_matrix(basis.nodes, gauss_nodes)
+    gauss2lobatto = polynomial_interpolation_matrix(gauss_nodes, basis.nodes)
+    return SurfaceIntegralWeakFormGaussQuad{typeof(surface_flux), RealT,
+                                            typeof(lobatto2gauss)}(surface_flux,
+                                                                   lobatto2gauss,
+                                                                   gauss2lobatto)
+end
+
 function Base.show(io::IO, ::MIME"text/plain", integral::SurfaceIntegralWeakForm)
     @nospecialize integral # reduce precompilation time
 

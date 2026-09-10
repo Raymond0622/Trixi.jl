@@ -118,22 +118,33 @@ volume_integral_entropy_stable = VolumeIntegralPureLGLFiniteVolume(surface_flux)
 volume_integral = VolumeIntegralAdaptive(indicator_ec,
                                          volume_integral_default,
                                          volume_integral_entropy_stable)
-volume_integral = VolumeIntegralWeakForm()
+#volume_integral = VolumeIntegralWeakForm()
 #volume_integral = VolumeIntegralFluxDifferencing(flux_ranocha)
 
-#indicator_sc = IndicatorHennemannGassner(equations, basis,
-#                                         alpha_max = 1.0,
-#                                         alpha_min = 0.001,
-#                                         alpha_smooth = true,
-#                                         variable = first)
-#volume_flux = flux_central
-#surface_flux = flux_lax_friedrichs
+indicator_sc = IndicatorHennemannGassner(equations, basis,
+                                        alpha_max = 1.0,
+                                        alpha_min = 0.001,
+                                        alpha_smooth = true,
+                                        variable = first)
+volume_flux = flux_central
+surface_flux = flux_lax_friedrichs
 
-#volume_integral = VolumeIntegralShockCapturingHG(indicator_sc;
-#                                                 volume_flux_dg = volume_flux,
-#                                                 volume_flux_fv = surface_flux)
+volume_integral = VolumeIntegralShockCapturingHG(indicator_sc;
+                                                volume_flux_dg = volume_flux,
+                                                volume_flux_fv = surface_flux)
 
-solver = DGSEM(basis, surface_flux, volume_integral, MortarEntropy(basis))
+# Pair mortar node set with the SAT (same as the hyperbolic MortarEntropy path).
+# Use a String so `trixi_include` / `convergence_test` can override without turning
+# `:gauss` into the bare name `gauss`.
+mortar_nodes = "gauss"
+if mortar_nodes == "gauss"
+    mortar = MortarEntropy(basis; nodes = :gauss)
+    surface_integral = SurfaceIntegralWeakFormGaussQuad(surface_flux, basis)
+else
+    mortar = MortarEntropy(basis; nodes = :gauss_lobatto)
+    surface_integral = SurfaceIntegralWeakForm(surface_flux)
+end
+solver = DGSEM(basis, surface_integral, volume_integral, mortar)
 
 
 coordinates_min = (0.0, 0.0)
@@ -169,20 +180,20 @@ Trixi.refine!(mesh.tree, cells_to_refine)
 VDM = Matrix{Float64}(I, polydeg + 1, polydeg + 1)
 filter = ones(polydeg + 1)
 
-semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
-                                             initial_condition, solver;
-                                             VDM = VDM, filter = filter,
-                                             ecav_choice = :ecav,
-                                             combine_rhs = Trixi.True(),
-                                             solver_parabolic = solver_parabolic)
+# semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
+#                                              initial_condition, solver;
+#                                              VDM = VDM, filter = filter,
+#                                              ecav_choice = :ecav,
+#                                              combine_rhs = Trixi.True(),
+#                                              solver_parabolic = solver_parabolic)
 
-# semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
-#     boundary_conditions=Trixi.boundary_condition_periodic)
+semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, solver;
+     boundary_conditions=Trixi.boundary_condition_periodic)
 
 ###############################################################################
 # ODE solvers, callbacks etc.
 
-tspan = (0.0, 0.25)
+tspan = (0.0, 0.2)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
@@ -198,7 +209,14 @@ stepsize_callback = StepsizeCallback(cfl = 0.5)
 callbacks = CallbackSet(summary_callback, analysis_callback, alive_callback,
                         save_solution)
 
-sol = solve(ode, SSPRK43(); abstol=1e-8, reltol=1e-6,
+local_limiter! = PositivityPreservingLimiterZhangShu(thresholds = (1e-1, 5.0e-6),
+                                                     variables = (Trixi.density, pressure))
+global_limiter! = PositivityPreservingLimiterLiuZhang(local_limiter!, semi;
+                                                      record_davis_yin_iterations = true)
+
+sol = solve(ode, SSPRK43(; stage_limiter! = global_limiter!,
+                            step_limiter! = global_limiter!);
+                             abstol=1e-8, reltol=1e-6, 
             saveat = 0.05,
             ode_default_options()..., callback = callbacks)
 
@@ -214,125 +232,8 @@ u0 = Trixi.wrap_array(ode.u0, mesh, equations, solver, semi.cache)
 all(all(all.(u0[v, :, :, e] .== u0[v, 1, 1, e] for e in Trixi.eachelement(solver, semi.cache)))
     for v in Trixi.eachvariable(equations))
 ###############################################################################
-# rhs_combined! from the IC: the first du is the KH seed on the slips.
-
-u_ode = copy(ode.u0)
-du_ode = similar(u_ode)
-
-@unpack mesh, equations, boundary_conditions, source_terms = semi
-@unpack equations_parabolic, boundary_conditions_parabolic = semi
-@unpack solver, solver_parabolic, cache, cache_parabolic = semi
-(; equations_artificial_viscosity) = semi.artificial_viscosity
-
-u = Trixi.wrap_array(u_ode, mesh, equations, solver, cache)
-du = Trixi.wrap_array(du_ode, mesh, equations, solver, cache)
-
-# Face nodes on x = x0 (vary y) or y = y0 (vary x). `side` is -1 if the element
-# is left/below the face, +1 if right/above.
-function gather_slip_nodes(u, cache, dg, equations; x0 = 0.5, dim = 1, atol = 1e-12)
-    s = Float64[]
-    vtau = Float64[]
-    cons_v = Float64[]
-    side = Int[]
-    v_index = dim == 1 ? 3 : 2  # x=0.5 slip → v2; y=0.5 slip → v1
-    for element in eachelement(dg, cache)
-        for j in eachnode(dg), i in eachnode(dg)
-            xy = Trixi.get_node_coords(cache.elements.node_coordinates, equations, dg,
-                                       i, j, element)
-            if abs(xy[dim] - x0) > atol
-                continue
-            end
-            face_index = dim == 1 ? i : j
-            u_node = Trixi.get_node_vars(u, equations, dg, i, j, element)
-            prim = cons2prim(u_node, equations)
-            push!(s, xy[3 - dim])
-            push!(vtau, prim[v_index])
-            push!(cons_v, u_node[v_index])
-            push!(side, face_index == 1 ? 1 : -1)
-        end
-    end
-    p = sortperm(s)
-    return s[p], vtau[p], cons_v[p], side[p]
-end
-
-function demean_by_segment(s, vals; cut = 0.5)
-    out = copy(vals)
-    for mask in (s .< cut, s .>= cut)
-        if any(mask)
-            out[mask] .-= sum(vals[mask]) / count(mask)
-        end
-    end
-    return out
-end
-
-dt = 1.0e-4
-n_steps = 3
-
-using Plots
-
-let t = 0.0
-    # First residual from the IC — this is the mesh-induced v_τ(y) seed.
-    Trixi.rhs_combined!(du, u, t, mesh,
-                        equations, equations_parabolic,
-                        equations_artificial_viscosity,
-                        boundary_conditions, boundary_conditions_parabolic,
-                        source_terms,
-                        solver, solver_parabolic, cache, cache_parabolic)
-
-    y, _, du_rho_v2, side_x = gather_slip_nodes(du, cache, solver, equations;
-                                                x0 = 0.5, dim = 1)
-    x, _, du_rho_v1, side_y = gather_slip_nodes(du, cache, solver, equations;
-                                                x0 = 0.5, dim = 2)
-    du_v2_pert = demean_by_segment(y, du_rho_v2)
-    du_v1_pert = demean_by_segment(x, du_rho_v1)
-    println("x=0.5  rms(du ρv₂ − segment mean) = ",
-            sqrt(sum(abs2, du_v2_pert) / length(du_v2_pert)))
-    println("y=0.5  rms(du ρv₁ − segment mean) = ",
-            sqrt(sum(abs2, du_v1_pert) / length(du_v1_pert)))
-
-    left = side_x .== -1
-    right = side_x .== 1
-    below = side_y .== -1
-    above = side_y .== 1
-
-    p_mesh = plot(getmesh(PlotData2D(u_ode, semi)); title = "checkerboard")
-    p_x = scatter(y[left], du_v2_pert[left]; xlabel = "y", ylabel = "du(ρv₂) − mean",
-                  label = "left of x=0.5", ms = 3, title = "seed on SW–SE slip")
-    scatter!(p_x, y[right], du_v2_pert[right]; label = "right of x=0.5", ms = 3)
-    p_y = scatter(x[below], du_v1_pert[below]; xlabel = "x", ylabel = "du(ρv₁) − mean",
-                  label = "below y=0.5", ms = 3, title = "seed on SW–NW slip")
-    scatter!(p_y, x[above], du_v1_pert[above]; label = "above y=0.5", ms = 3)
-    plot(p_mesh, p_x, p_y; layout = (1, 3), size = (1500, 450))
-    savefig("perturbation.png")
-
-    for step in 1:n_steps
-        Trixi.rhs_combined!(du, u, t, mesh,
-                            equations, equations_parabolic,
-                            equations_artificial_viscosity,
-                            boundary_conditions, boundary_conditions_parabolic,
-                            source_terms,
-                            solver, solver_parabolic, cache, cache_parabolic)
-        @. u_ode = u_ode + dt * du_ode
-        t += dt
-        println("step = $step, t = $t, max|du| = $(maximum(abs, du_ode))")
-    end
-
-    y_u, v2, _, side_u = gather_slip_nodes(u, cache, solver, equations;
-                                           x0 = 0.5, dim = 1)
-    v2_pert = demean_by_segment(y_u, v2)
-    left_u = side_u .== -1
-    right_u = side_u .== 1
-    println("after Euler, rms(v₂ − segment mean) on x=0.5 = ",
-            sqrt(sum(abs2, v2_pert) / length(v2_pert)))
-
-    pd = PlotData2D(u_ode, semi; solution_variables = cons2prim)
-    p_rho = plot(pd["rho"]; clims = (0.4, 2.0),
-                 title = "rho at t = $(round(t; digits = 6))")
-    plot!(p_rho, getmesh(pd))
-    p_v2 = scatter(y_u[left_u], v2_pert[left_u]; xlabel = "y",
-                   ylabel = "v₂ − segment mean", label = "left of x=0.5", ms = 3,
-                   title = "v₂ wrinkle after Euler")
-    scatter!(p_v2, y_u[right_u], v2_pert[right_u]; label = "right of x=0.5", ms = 3)
-    plot(p_rho, p_v2; layout = (1, 2), size = (1100, 450))
-    savefig("rho.png")
-end
+# # Domain-integrated entropy at each saved solution time (same quadrature as AnalysisCallback)
+entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
+plot(sol.t, entropy_integral, xlabel = "t", ylabel = "∫ S dV / |Ω|",
+        legend = false, title = "entropy integral")
+savefig("entropy_integral.png")

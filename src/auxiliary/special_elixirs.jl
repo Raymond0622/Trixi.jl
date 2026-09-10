@@ -144,15 +144,49 @@ end
 
 # Helper methods used in the functions defined above
 
+# Last numeric assignment to `destination` in `expr` (top-level or keyword).
+# Ignores `destination = destination` kwargs, whose RHS is a Symbol.
+function last_numeric_assignment(expr, destination)
+    local result
+    found = false
+
+    visit = function (x)
+        if x isa Expr
+            if (x.head === :(=) || x.head === :kw) && x.args[1] === destination
+                rhs = x.args[2]
+                if rhs isa Integer
+                    result = Int(rhs)
+                    found = true
+                elseif rhs isa Expr && rhs.head === :tuple
+                    result = eval(rhs)
+                    found = true
+                end
+            end
+            for arg in x.args
+                visit(arg)
+            end
+        end
+        return nothing
+    end
+    visit(expr)
+
+    if !found
+        throw(ArgumentError("assignment `$destination` not found in expression"))
+    end
+    return result
+end
+
 # Searches for the assignment that specifies the mesh resolution in the elixir
 function extract_initial_resolution(elixir, kwargs)
     code = read(elixir, String)
     expr = Meta.parse("begin \n$code \nend")
 
     try
-        # get the initial_refinement_level from the elixir
-        initial_refinement_level = TrixiBase.find_assignment(expr,
-                                                             :initial_refinement_level)
+        # Last assignment wins in `find_assignment`. Skip
+        # `initial_refinement_level = initial_refinement_level` kwargs (a Symbol)
+        # and keep a numeric literal.
+        initial_refinement_level = last_numeric_assignment(expr,
+                                                           :initial_refinement_level)
 
         if haskey(kwargs, :initial_refinement_level)
             return kwargs[:initial_refinement_level]
