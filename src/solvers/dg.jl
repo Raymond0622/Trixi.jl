@@ -815,31 +815,38 @@ end
 SurfaceIntegralWeakForm() = SurfaceIntegralWeakForm(flux_central)
 
 """
-    SurfaceIntegralWeakFormGaussQuad(surface_flux, basis::LobattoLegendreBasis)
+    SurfaceIntegralWeakFormGauss(surface_flux=flux_central)
 
-LGL-volume DGSEM surface term with Riemann states interpolated to Gauss nodes.
-`surface_flux_values` store fluxes at those Gauss nodes. The SAT that matches
-the LGL SBP volume is interpolation of `f*` back to LGL, then the standard
-`M^{-1} B` lift (`f^*/ω_N`), not lumped-mass `M^{-1} V^T W_G f^*`.
+Weak-form SAT on an LGL volume basis that evaluates the face integral with
+Gauss quadrature of the LGL interpolant:
+
+```
+(M du)_face,i  -=  ∑_k W_G[k] f*(η_k^G) ℓ_i^{LGL}(η_k^G)
+```
+
+which is the nodal lift `du_face -= inverse_weights[endpoint] * Q f*`.
+
+- LGL `f*` (MortarL2): `Q = W_LGL^{-1} I_{L→G}^T W_G I_{L→G}` (Gauss quadrature of the interpolant).
+- Gauss `f*` (MortarEntropy `nodes = :gauss`): `Q = I_{L→G}^T W_G` (lift), then
+  `du_face -= (ω_end ω_l)^{-1} (Q f*_G)`. `I_{L→G}` evaluates LGL Lagrange at Gauss nodes.
 """
-struct SurfaceIntegralWeakFormGaussQuad{SurfaceFlux, RealT,
-                                        MatrixT <: AbstractMatrix{RealT}} <:
-       AbstractSurfaceIntegral
+struct SurfaceIntegralWeakFormGauss{SurfaceFlux} <: AbstractSurfaceIntegral
     surface_flux::SurfaceFlux
-    lobatto2gauss::MatrixT
-    gauss2lobatto::MatrixT
 end
 
-function SurfaceIntegralWeakFormGaussQuad(surface_flux,
-                                          basis)
-    RealT = real(basis)
-    gauss_nodes, _ = gauss_nodes_weights(nnodes(basis), RealT)
-    lobatto2gauss = polynomial_interpolation_matrix(basis.nodes, gauss_nodes)
-    gauss2lobatto = polynomial_interpolation_matrix(gauss_nodes, basis.nodes)
-    return SurfaceIntegralWeakFormGaussQuad{typeof(surface_flux), RealT,
-                                            typeof(lobatto2gauss)}(surface_flux,
-                                                                   lobatto2gauss,
-                                                                   gauss2lobatto)
+SurfaceIntegralWeakFormGauss() = SurfaceIntegralWeakFormGauss(flux_central)
+
+function Base.show(io::IO, ::MIME"text/plain", integral::SurfaceIntegralWeakFormGauss)
+    @nospecialize integral # reduce precompilation time
+
+    if get(io, :compact, false)
+        show(io, integral)
+    else
+        setup = [
+            "surface flux" => integral.surface_flux
+        ]
+        summary_box(io, "SurfaceIntegralWeakFormGauss", setup)
+    end
 end
 
 function Base.show(io::IO, ::MIME"text/plain", integral::SurfaceIntegralWeakForm)
@@ -1120,6 +1127,18 @@ end
 @inline function set_node_vars!(u, u_node, equations, solver::DG, indices...)
     for v in eachvariable(equations)
         u[v, indices...] = u_node[v]
+    end
+    return nothing
+end
+
+# Mortar traces are `u[leftright, variable, node, mortar]`, so
+# `set_node_vars!` (which writes `u[variable, indices...]`) cannot be
+# used on the raw array. This writes one side componentwise instead of
+# `u[leftright, :, node, mortar] = SVector`, which can allocate.
+@inline function set_mortar_node_vars!(u, u_node, equations, solver::DG,
+                                       leftright, indices...)
+    for v in eachvariable(equations)
+        u[leftright, v, indices...] = u_node[v]
     end
     return nothing
 end

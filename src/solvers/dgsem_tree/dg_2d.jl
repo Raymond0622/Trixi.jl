@@ -98,10 +98,12 @@ function create_cache(mesh::TreeMesh{2}, equations,
     fstar_secondary_upper_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
     fstar_secondary_lower_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
     u_threaded = MA2d[MA2d(undef) for _ in 1:Threads.maxthreadid()]
+    mortar_interp_tmp_threaded = [Vector{uEltype}(undef, nnodes(mortar_l2))
+                                  for _ in 1:Threads.maxthreadid()]
 
     cache = (; fstar_primary_upper_threaded, fstar_primary_lower_threaded,
              fstar_secondary_upper_threaded, fstar_secondary_lower_threaded,
-             u_threaded)
+             u_threaded, mortar_interp_tmp_threaded)
 
     return cache
 end
@@ -550,7 +552,17 @@ end
 
 function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{2}, equations,
                              dg::DGSEM{<:LobattoLegendreBasis},
-                             ::AbstractSurfaceIntegral)
+                             ::SurfaceIntegralWeakFormGauss)
+    prolong2interfaces!(backend, cache, u, mesh, equations, dg, Val(:lgl_copy))
+    if mortar_uses_gauss_nodes(dg)
+        interpolate_lgl_to_gauss_face_storage!(cache.interfaces.u, dg, cache)
+    end
+    return nothing
+end
+
+function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{2}, equations,
+                             dg::DGSEM{<:LobattoLegendreBasis},
+                             ::Union{AbstractSurfaceIntegral, Val{:lgl_copy}})
     @unpack interfaces = cache
     @unpack orientations, neighbor_ids = interfaces
     interfaces_u = interfaces.u
@@ -568,59 +580,6 @@ function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{2}, equa
             for i in eachnode(dg), v in eachvariable(equations)
                 interfaces_u[1, v, i, interface] = u[v, i, nnodes(dg), left_element]
                 interfaces_u[2, v, i, interface] = u[v, i, 1, right_element]
-            end
-        end
-    end
-
-    return nothing
-end
-
-# LGL volume, Gauss nodes along the face for the Riemann solver.
-# Interpolate with explicit loops: `lobatto2gauss * u[v, nnodes, :, e]` is unsafe
-# on Trixi's wrapped `PtrArray` solution and mixes the wrong axis.
-function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{2}, equations,
-                             dg::DGSEM{<:LobattoLegendreBasis},
-                             surface_integral::SurfaceIntegralWeakFormGaussQuad)
-    @unpack interfaces = cache
-    @unpack orientations, neighbor_ids = interfaces
-    @unpack lobatto2gauss = surface_integral
-    interfaces_u = interfaces.u
-
-    @threaded for interface in eachinterface(dg, cache)
-        left_element = neighbor_ids[1, interface]
-        right_element = neighbor_ids[2, interface]
-
-        if orientations[interface] == 1
-            for v in eachvariable(equations)
-                for g in eachnode(dg)
-                    acc_left = zero(eltype(interfaces_u))
-                    acc_right = zero(eltype(interfaces_u))
-                    for k in eachnode(dg)
-                        acc_left = (acc_left +
-                                    lobatto2gauss[g, k] *
-                                    u[v, nnodes(dg), k, left_element])
-                        acc_right = (acc_right +
-                                     lobatto2gauss[g, k] * u[v, 1, k, right_element])
-                    end
-                    interfaces_u[1, v, g, interface] = acc_left
-                    interfaces_u[2, v, g, interface] = acc_right
-                end
-            end
-        else
-            for v in eachvariable(equations)
-                for g in eachnode(dg)
-                    acc_left = zero(eltype(interfaces_u))
-                    acc_right = zero(eltype(interfaces_u))
-                    for k in eachnode(dg)
-                        acc_left = (acc_left +
-                                    lobatto2gauss[g, k] *
-                                    u[v, k, nnodes(dg), left_element])
-                        acc_right = (acc_right +
-                                     lobatto2gauss[g, k] * u[v, k, 1, right_element])
-                    end
-                    interfaces_u[1, v, g, interface] = acc_left
-                    interfaces_u[2, v, g, interface] = acc_right
-                end
             end
         end
     end
@@ -794,6 +753,60 @@ function prolong2boundaries!(backend::Nothing, cache, u,
                 end
             else
                 # element in +y direction of boundary
+                for l in eachnode(dg), v in eachvariable(equations)
+                    boundaries.u[2, v, l, boundary] = u[v, l, 1, element]
+                end
+            end
+        end
+    end
+
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u,
+                             mesh::TreeMesh{2}, equations,
+                             dg::DGSEM{<:LobattoLegendreBasis})
+    prolong2boundaries!(backend, cache, u, mesh, equations, dg, dg.surface_integral)
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u,
+                             mesh::TreeMesh{2}, equations,
+                             dg::DGSEM{<:LobattoLegendreBasis},
+                             ::SurfaceIntegralWeakFormGauss)
+    prolong2boundaries!(backend, cache, u, mesh, equations, dg, Val(:lgl_copy))
+    if mortar_uses_gauss_nodes(dg)
+        interpolate_lgl_to_gauss_face_storage!(cache.boundaries.u, dg, cache)
+    end
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u,
+                             mesh::TreeMesh{2}, equations,
+                             dg::DGSEM{<:LobattoLegendreBasis},
+                             ::Union{AbstractSurfaceIntegral, Val{:lgl_copy}})
+    @unpack boundaries = cache
+    @unpack orientations, neighbor_sides = boundaries
+
+    @threaded for boundary in eachboundary(dg, cache)
+        element = boundaries.neighbor_ids[boundary]
+
+        if orientations[boundary] == 1
+            if neighbor_sides[boundary] == 1
+                for l in eachnode(dg), v in eachvariable(equations)
+                    boundaries.u[1, v, l, boundary] = u[v, nnodes(dg), l, element]
+                end
+            else
+                for l in eachnode(dg), v in eachvariable(equations)
+                    boundaries.u[2, v, l, boundary] = u[v, 1, l, element]
+                end
+            end
+        else
+            if neighbor_sides[boundary] == 1
+                for l in eachnode(dg), v in eachvariable(equations)
+                    boundaries.u[1, v, l, boundary] = u[v, l, nnodes(dg), element]
+                end
+            else
                 for l in eachnode(dg), v in eachvariable(equations)
                     boundaries.u[2, v, l, boundary] = u[v, l, 1, element]
                 end
@@ -1010,7 +1023,7 @@ function prolong2mortars_interpolate!(cache, u,
                                                        LobattoLegendreMortarEntropy},
                                       dg::DGSEM)
     nodes = mortar_nodes(mortar_l2)
-    lobatto2gauss = nodes isa Val{:gauss} ? lobatto2gauss_interpolation(dg) : nothing
+    lobatto2gauss = mortar_lobatto2gauss(mortar_l2, dg)
 
     @threaded for mortar in eachmortar(dg, cache)
         large_element = cache.mortars.neighbor_ids[3, mortar]
@@ -1087,48 +1100,42 @@ function prolong2mortars_interpolate!(cache, u,
     return nothing
 end
 
+@inline mortar_lobatto2gauss(::LobattoLegendreMortarL2, dg) = nothing
+@inline mortar_lobatto2gauss(mortar::LobattoLegendreMortarEntropy, dg) = mortar.lobatto2gauss
+
 @inline function interpolate_to_mortar_nodes!(dest, ::Val{:gauss},
-                                              lobatto2gauss)
-    dest .= lobatto2gauss * dest
+                                              lobatto2gauss, tmp)
+    mul!(tmp, lobatto2gauss, dest)
+    copyto!(dest, tmp)
     return nothing
 end
 
 @inline function interpolate_to_mortar_nodes!(dest, ::Val{:gauss_lobatto},
-                                              lobatto2gauss)
+                                              lobatto2gauss, tmp)
     return nothing
-end
-
-@inline function lobatto2gauss_interpolation(dg::DGSEM)
-    si = dg.surface_integral
-    if si isa SurfaceIntegralWeakFormGaussQuad
-        return si.lobatto2gauss
-    end
-    gauss_nodes, _ = gauss_nodes_weights(nnodes(dg), real(dg))
-    return polynomial_interpolation_matrix(dg.basis.nodes, gauss_nodes)
 end
 
 # After LGL copies into mortar storage, optionally interpolate traces to Gauss
 # and apply the large-face forward operator at those nodes.
 function interpolate_mortar_traces_to_nodes!(cache, mortar, mortar_l2, equations, dg,
                                              u_large, leftright, nodes, lobatto2gauss)
-    leftright_small = cache.mortars.large_sides[mortar] == 1 ? 2 : 1
-    for v in eachvariable(equations)
-        interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, leftright_small, v, :,
-                                          mortar),
-                                     nodes, lobatto2gauss)
-        interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, leftright_small, v, :,
-                                          mortar),
-                                     nodes, lobatto2gauss)
-    end
+    tmp = cache.mortar_interp_tmp_threaded[Threads.threadid()]
     if nodes isa Val{:gauss}
+        leftright_small = cache.mortars.large_sides[mortar] == 1 ? 2 : 1
+        for v in eachvariable(equations)
+            interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, leftright_small, v, :,
+                                              mortar),
+                                         nodes, lobatto2gauss, tmp)
+            interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, leftright_small, v, :,
+                                              mortar),
+                                         nodes, lobatto2gauss, tmp)
+        end
         u_buffer = cache.u_threaded[Threads.threadid()]
         for l in eachnode(dg)
             set_node_vars!(u_buffer, get_node_vars(u_large, equations, dg, l),
                            equations, dg, l)
         end
-        for v in eachvariable(equations)
-            interpolate_to_mortar_nodes!(view(u_buffer, v, :), nodes, lobatto2gauss)
-        end
+        # Forward `I` maps large LGL → small Gauss.
         element_solutions_to_mortars!(cache.mortars, mortar_l2, leftright, mortar,
                                       u_buffer)
     else
@@ -1142,103 +1149,83 @@ function prolong2mortars!(cache, u::AbstractArray,
                           mesh::TreeMesh{2}, equations,
                           mortar_l2::LobattoLegendreMortarEntropy,
                           dg::DGSEM)
-
-    n_nodes = nnodes(dg)
-    RealT = real(dg)
-    gauss_nodes, _ = gauss_nodes_weights(n_nodes, RealT)
-    lobatto_nodes, _ = gauss_lobatto_nodes_weights(n_nodes, RealT)
-    lobatto2gauss = polynomial_interpolation_matrix(lobatto_nodes, gauss_nodes)
     nodes = mortar_nodes(mortar_l2)
+    lobatto2gauss = mortar_lobatto2gauss(mortar_l2, dg)
 
     @threaded for mortar in eachmortar(dg, cache)
         large_element = cache.mortars.neighbor_ids[3, mortar]
         upper_element = cache.mortars.neighbor_ids[2, mortar]
         lower_element = cache.mortars.neighbor_ids[1, mortar]
+        tmp = cache.mortar_interp_tmp_threaded[Threads.threadid()]
 
         # Small faces: entropy variables at LGL, then interpolate to Gauss if requested.
         if cache.mortars.large_sides[mortar] == 1 # -> small elements on right side
             if cache.mortars.orientations[mortar] == 1
-                # L2 mortars in x-direction
                 for l in eachnode(dg)
                     u_upper_node = get_node_vars(u, equations, dg, 1, l, upper_element)
                     u_lower_node = get_node_vars(u, equations, dg, 1, l, lower_element)
-                    cache.mortars.u_upper[2, :, l, mortar] = cons2entropy(u_upper_node,
-                                                                          equations)
-                    cache.mortars.u_lower[2, :, l, mortar] = cons2entropy(u_lower_node,
-                                                                          equations)
-                end
-                for v in eachvariable(equations)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, 2, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, 2, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
+                    set_mortar_node_vars!(cache.mortars.u_upper,
+                                          cons2entropy(u_upper_node, equations),
+                                          equations, dg, 2, l, mortar)
+                    set_mortar_node_vars!(cache.mortars.u_lower,
+                                          cons2entropy(u_lower_node, equations),
+                                          equations, dg, 2, l, mortar)
                 end
             else
-                # L2 mortars in y-direction
                 for l in eachnode(dg)
                     u_upper_node = get_node_vars(u, equations, dg, l, 1, upper_element)
                     u_lower_node = get_node_vars(u, equations, dg, l, 1, lower_element)
-                    cache.mortars.u_upper[2, :, l, mortar] = cons2entropy(u_upper_node,
-                                                                          equations)
-                    cache.mortars.u_lower[2, :, l, mortar] = cons2entropy(u_lower_node,
-                                                                          equations)
-                end
-                for v in eachvariable(equations)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, 2, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, 2, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
+                    set_mortar_node_vars!(cache.mortars.u_upper,
+                                          cons2entropy(u_upper_node, equations),
+                                          equations, dg, 2, l, mortar)
+                    set_mortar_node_vars!(cache.mortars.u_lower,
+                                          cons2entropy(u_lower_node, equations),
+                                          equations, dg, 2, l, mortar)
                 end
             end
         else # large_sides[mortar] == 2 -> small elements on left side
             if cache.mortars.orientations[mortar] == 1
-                # L2 mortars in x-direction
                 for l in eachnode(dg)
                     u_upper_node = get_node_vars(u, equations, dg, nnodes(dg), l,
                                                  upper_element)
                     u_lower_node = get_node_vars(u, equations, dg, nnodes(dg), l,
                                                  lower_element)
-                    cache.mortars.u_upper[1, :, l, mortar] = cons2entropy(u_upper_node,
-                                                                          equations)
-                    cache.mortars.u_lower[1, :, l, mortar] = cons2entropy(u_lower_node,
-                                                                          equations)
-                end
-                for v in eachvariable(equations)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, 1, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, 1, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
+                    set_mortar_node_vars!(cache.mortars.u_upper,
+                                          cons2entropy(u_upper_node, equations),
+                                          equations, dg, 1, l, mortar)
+                    set_mortar_node_vars!(cache.mortars.u_lower,
+                                          cons2entropy(u_lower_node, equations),
+                                          equations, dg, 1, l, mortar)
                 end
             else
-                # L2 mortars in y-direction
                 for l in eachnode(dg)
                     u_upper_node = get_node_vars(u, equations, dg, l, nnodes(dg),
                                                  upper_element)
                     u_lower_node = get_node_vars(u, equations, dg, l, nnodes(dg),
                                                  lower_element)
-                    cache.mortars.u_upper[1, :, l, mortar] = cons2entropy(u_upper_node,
-                                                                          equations)
-                    cache.mortars.u_lower[1, :, l, mortar] = cons2entropy(u_lower_node,
-                                                                          equations)
-                end
-                for v in eachvariable(equations)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, 1, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
-                    interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, 1, v,
-                                                              :, mortar),
-                                                         nodes, lobatto2gauss)
+                    set_mortar_node_vars!(cache.mortars.u_upper,
+                                          cons2entropy(u_upper_node, equations),
+                                          equations, dg, 1, l, mortar)
+                    set_mortar_node_vars!(cache.mortars.u_lower,
+                                          cons2entropy(u_lower_node, equations),
+                                          equations, dg, 1, l, mortar)
                 end
             end
         end
 
-        # Convert the large element face to entropy variables, then interpolate
+        if nodes isa Val{:gauss}
+            leftright_small = cache.mortars.large_sides[mortar] == 1 ? 2 : 1
+            for v in eachvariable(equations)
+                interpolate_to_mortar_nodes!(view(cache.mortars.u_upper, leftright_small, v,
+                                                  :, mortar),
+                                             nodes, lobatto2gauss, tmp)
+                interpolate_to_mortar_nodes!(view(cache.mortars.u_lower, leftright_small, v,
+                                                  :, mortar),
+                                             nodes, lobatto2gauss, tmp)
+            end
+        end
+
+        # Large face: entropy at LGL, optional Gauss interpolation, then forward maps.
         u_buffer = cache.u_threaded[Threads.threadid()]
         if cache.mortars.large_sides[mortar] == 1 # -> large element on left side
             leftright = 1
@@ -1256,39 +1243,33 @@ function prolong2mortars!(cache, u::AbstractArray,
             end
         end
         for l in eachnode(dg)
-            u_node = get_node_vars(u_large, equations, dg, l)
-            set_node_vars!(u_buffer, cons2entropy(u_node, equations), equations, dg, l)
+            set_node_vars!(u_buffer,
+                           cons2entropy(get_node_vars(u_large, equations, dg, l),
+                                        equations), equations, dg, l)
         end
-        for v in eachvariable(equations)
-            interpolate_to_mortar_nodes!(view(u_buffer, v, :), nodes,
-                                                 lobatto2gauss)
-        end
-        # for l in eachnode(dg)
-        #     u_node = get_node_vars(u_large, equations, dg, l)
-        #     v_node = cons2entropy(u_node, equations)
-        #     set_node_vars!(u_buffer, v_node, equations, dg, l)
-        # end
+        # Forward `I` already maps large LGL → small Gauss; do not interpolate
+        # the large face to Gauss first.
         element_solutions_to_mortars!(cache.mortars, mortar_l2, leftright, mortar,
                                       u_buffer)
-    end
 
-    # Convert interpolated entropy variables back to conserved variables
-    @threaded for mortar in eachmortar(dg, cache)
+        # Convert interpolated entropy variables back to conserved variables.
         for l in eachnode(dg)
             v_upper_ll, v_upper_rr = get_surface_node_vars(cache.mortars.u_upper,
                                                            equations, dg, l, mortar)
-            u_upper_ll = entropy2cons(v_upper_ll, equations)
-            u_upper_rr = entropy2cons(v_upper_rr, equations)
             v_lower_ll, v_lower_rr = get_surface_node_vars(cache.mortars.u_lower,
                                                            equations, dg, l, mortar)
-            u_lower_ll = entropy2cons(v_lower_ll, equations)
-            u_lower_rr = entropy2cons(v_lower_rr, equations)
-            for v in eachvariable(equations)
-                cache.mortars.u_upper[1, v, l, mortar] = u_upper_ll[v]
-                cache.mortars.u_upper[2, v, l, mortar] = u_upper_rr[v]
-                cache.mortars.u_lower[1, v, l, mortar] = u_lower_ll[v]
-                cache.mortars.u_lower[2, v, l, mortar] = u_lower_rr[v]
-            end
+            set_mortar_node_vars!(cache.mortars.u_upper,
+                                  entropy2cons(v_upper_ll, equations),
+                                  equations, dg, 1, l, mortar)
+            set_mortar_node_vars!(cache.mortars.u_upper,
+                                  entropy2cons(v_upper_rr, equations),
+                                  equations, dg, 2, l, mortar)
+            set_mortar_node_vars!(cache.mortars.u_lower,
+                                  entropy2cons(v_lower_ll, equations),
+                                  equations, dg, 1, l, mortar)
+            set_mortar_node_vars!(cache.mortars.u_lower,
+                                  entropy2cons(v_lower_rr, equations),
+                                  equations, dg, 2, l, mortar)
         end
     end
 
@@ -1336,6 +1317,7 @@ function calc_mortar_flux!(surface_flux_values,
         # possible since for conservative equations, numerical fluxes
         # are unique at interfaces (instead of having two different
         # fluxes/fluctuations for non-conservative equations).
+
         mortar_fluxes_to_elements!(surface_flux_values,
                                    mesh, equations, mortar_l2, dg, cache, mortar,
                                    fstar_primary_upper, fstar_primary_lower,
@@ -1508,8 +1490,12 @@ end
             direction = 4
         end
     end
-    surface_flux_values[:, :, direction, upper_element] .= fstar_primary_upper
-    surface_flux_values[:, :, direction, lower_element] .= fstar_primary_lower
+    copy_mortar_flux_to_small_element!(view(surface_flux_values, :, :, direction,
+                                            upper_element),
+                                       fstar_primary_upper, mortar_l2)
+    copy_mortar_flux_to_small_element!(view(surface_flux_values, :, :, direction,
+                                            lower_element),
+                                       fstar_primary_lower, mortar_l2)
 
     # Project small fluxes to large element
     if cache.mortars.large_sides[mortar] == 1 # -> large element on left side
@@ -1544,7 +1530,7 @@ end
     #   @views mul!(surface_flux_values[v, :, direction, large_element],
     #               mortar_l2.reverse_lower, fstar_lower[v, :], true, true)
     # end
-    # The code above could b   e replaced by the following code. However, the relative efficiency
+    # The code above could be replaced by the following code. However, the relative efficiency
     # depends on the types of fstar_upper/fstar_lower and dg.l2mortar_reverse_upper.
     # Using StaticArrays for both makes the code above faster for common test cases.
     multiply_dimensionwise!(view(surface_flux_values, :, :, direction, large_element),
@@ -1598,45 +1584,103 @@ function calc_surface_integral!(backend::Nothing, du, u,
     return nothing
 end
 
-# Riemann at Gauss nodes; SAT at LGL nodes (same `M^{-1} B` as `SurfaceIntegralWeakForm`).
-# Requires `surface_flux_values` at Gauss nodes (see prolong2interfaces! / mortars).
 function calc_surface_integral!(backend::Nothing, du, u,
-                                mesh::Union{TreeMesh{2}, StructuredMesh{2},
-                                            StructuredMeshView{2}},
-                                equations,
-                                surface_integral::SurfaceIntegralWeakFormGaussQuad,
-                                dg::DG, cache)
+                                mesh::Union{TreeMesh{2},
+                                            StructuredMesh{2}, StructuredMeshView{2}},
+                                equations, surface_integral::SurfaceIntegralWeakFormGauss,
+                                dg::DGSEM{<:LobattoLegendreBasis}, cache)
     @unpack inverse_weights = dg.basis
     @unpack surface_flux_values = cache.elements
-    @unpack gauss2lobatto = surface_integral
-
+    Q = gauss_sat_face_matrix(dg)
     factor = inverse_weights[1]
+    n = nnodes(dg)
+    gauss_fstar = mortar_uses_gauss_nodes(dg)
 
+    # Negative surface integral with Gauss quadrature. `Q` maps stored `f*`
+    # (LGL interpolant or Gauss-nodal) to the LGL face lift.
     @threaded for element in eachelement(dg, cache)
-        for v in eachvariable(equations)
-            for l in eachnode(dg)
-                f_left = zero(eltype(du))
-                f_right = zero(eltype(du))
-                f_bottom = zero(eltype(du))
-                f_top = zero(eltype(du))
-                for g in eachnode(dg)
-                    V = gauss2lobatto[l, g]
-                    f_left += V * surface_flux_values[v, g, 1, element]
-                    f_right += V * surface_flux_values[v, g, 2, element]
-                    f_bottom += V * surface_flux_values[v, g, 3, element]
-                    f_top += V * surface_flux_values[v, g, 4, element]
+        for l in eachnode(dg)
+            # Gauss-nodal lift is `I_{L→G}^T W_G`; lumped `M^{-1}` needs `1/ω_l`.
+            scale = gauss_fstar ? factor * inverse_weights[l] : factor
+            for v in eachvariable(equations)
+                g1 = g2 = g3 = g4 = zero(eltype(du))
+                for k in eachnode(dg)
+                    g1 += Q[l, k] * surface_flux_values[v, k, 1, element]
+                    g2 += Q[l, k] * surface_flux_values[v, k, 2, element]
+                    g3 += Q[l, k] * surface_flux_values[v, k, 3, element]
+                    g4 += Q[l, k] * surface_flux_values[v, k, 4, element]
                 end
-                du[v, 1, l, element] = du[v, 1, l, element] - f_left * factor
-                du[v, nnodes(dg), l, element] = (du[v, nnodes(dg), l, element] +
-                                                 f_right * factor)
-                du[v, l, 1, element] = du[v, l, 1, element] - f_bottom * factor
-                du[v, l, nnodes(dg), element] = (du[v, l, nnodes(dg), element] +
-                                                 f_top * factor)
+
+                du[v, 1, l, element] = (du[v, 1, l, element] - g1 * scale)
+                du[v, n, l, element] = (du[v, n, l, element] + g2 * scale)
+                du[v, l, 1, element] = (du[v, l, 1, element] - g3 * scale)
+                du[v, l, n, element] = (du[v, l, n, element] + g4 * scale)
             end
         end
     end
 
     return nothing
+end
+
+@inline function mortar_uses_gauss_nodes(dg)
+    m = dg.mortar
+    return m isa LobattoLegendreMortarEntropy && mortar_nodes(m) isa Val{:gauss}
+end
+
+function gauss_sat_face_matrix(dg)
+    if mortar_uses_gauss_nodes(dg)
+        return gauss_face_lift_from_gauss_nodes(dg.basis)
+    else
+        return gauss_lgl_face_mass(dg.basis)
+    end
+end
+
+function interpolate_lgl_to_gauss_face_storage!(u_storage, dg, cache)
+    I_lg = dg.mortar.lobatto2gauss
+    tmp = cache.mortar_interp_tmp_threaded[Threads.threadid()]
+    for iface in axes(u_storage, 4)
+        for side in axes(u_storage, 1)
+            for v in axes(u_storage, 2)
+                u_view = view(u_storage, side, v, :, iface)
+                mul!(tmp, I_lg, u_view)
+                copyto!(u_view, tmp)
+            end
+        end
+    end
+    return nothing
+end
+
+@inline function is_hanging_face(hanging_faces, element, direction)
+    return (hanging_faces[element] & (0x01 << (direction - 1))) != 0
+end
+
+function mortar_face_directions(large_sides, orientation)
+    if large_sides == 1 # small elements on the right / top
+        if orientation == 1
+            return 2, 1 # large +x, small -x
+        else
+            return 4, 3 # large +y, small -y
+        end
+    else # small elements on the left / bottom
+        if orientation == 1
+            return 1, 2 # large -x, small +x
+        else
+            return 3, 4 # large -y, small +y
+        end
+    end
+end
+
+function mark_hanging_faces!(hanging_faces, dg, cache)
+    fill!(hanging_faces, 0x00)
+    mortars = cache.mortars
+    for mortar in eachmortar(dg, cache)
+        large_dir, small_dir = mortar_face_directions(mortars.large_sides[mortar],
+                                                      mortars.orientations[mortar])
+        hanging_faces[mortars.neighbor_ids[3, mortar]] |= 0x01 << (large_dir - 1)
+        hanging_faces[mortars.neighbor_ids[2, mortar]] |= 0x01 << (small_dir - 1)
+        hanging_faces[mortars.neighbor_ids[1, mortar]] |= 0x01 << (small_dir - 1)
+    end
+    return hanging_faces
 end
 
 function calc_surface_integral!(backend::Nothing, du, u,

@@ -4,26 +4,22 @@ using LinearAlgebra: I
 using Trixi
 
 ###############################################################################
-# Isentropic vortex with ECAV on a checkerboard TreeMesh.
-# Volume integral is `VolumeIntegralWeakForm` (same as `elixir_ecav_blast.jl`),
-# not entropy-conservative flux differencing. Physical NS viscosity is off
-# (`mu = 0`). The exact solution is time-dependent so `convergence_test` can
-# use a short tspan.
+# Weak blast wave (Hennemann & Gassner 2020, Sec. 6.3) on a checkerboard TreeMesh.
+# Volume integral is `VolumeIntegralWeakForm` (same as the ECAV vortex / density-wave
+# elixirs), not entropy-conservative flux differencing.
 #
-# Mortar / capturing switches (strings so `trixi_include` / `convergence_test`
-# can override them):
+# Mortar / capturing switches (strings so `trixi_include` can override them):
 #   mortar_type      = "entropy" | "l2"
 #   mortar_nodes     = "gauss_lobatto" | "gauss"   (entropy only)
 #   reverse_quad     = "gauss" | "gauss_lobatto"   (LGL entropy mortars only)
 #   shock_capturing  = "ecav" | "none"
-# Default below: MortarEntropy Gauss traces/Riemann + LGL SAT (`f*/ω`).
-# Reverse: `P = M_f^{-1} I^T M_m` with lumped `M_f = W_LGL`, `M_m = W_G / 2`,
-# `I` = large LGL → small Gauss half. Small-face `f*` interpolated Gauss→LGL.
+# `mortar_nodes = "gauss"` → Gauss traces/Riemann, L² reverse
+# `P = M_f^{-1} I^T M_m` with lumped `M_f = W_LGL`, `M_m = W_G / 2`.
+# SAT is always LGL `SurfaceIntegralWeakForm` (`f*/ω`).
 # `reverse_quad` is not named `reverse_quadrature` so `trixi_include` cannot
 # rewrite the `MortarEntropy(...; reverse_quadrature = ...)` keyword.
 
-gamma = 1.4
-equations = CompressibleEulerEquations2D(gamma)
+equations = CompressibleEulerEquations2D(1.4)
 
 prandtl_number() = 0.73
 mu() = 0.0
@@ -31,46 +27,38 @@ equations_parabolic = CompressibleNavierStokesDiffusion2D(equations, mu = mu(),
                                                           Prandtl = prandtl_number(),
                                                           gradient_variables = GradientVariablesEntropy())
 solver_parabolic = Trixi.ParabolicFormulationBassiRebay1()
-solver_parabolic = Trixi.ParabolicFormulationLocalDG()
 
-"""
-    initial_condition_isentropic_vortex(x, t, equations::CompressibleEulerEquations2D)
+# Fraction of the Hennemann–Gassner (Sec. 6.3) jump. `1` is the original weak
+# blast (`ρ, |v|, p = 1.1691, 0.1882, 1.245` inside `r = 0.5`). String/scalar
+# assignment so `trixi_include` can override it.
+blast_strength = 0.1;
+function initial_condition_weaker_blast_wave(x, t, equations)
+    inicenter = SVector(0, 0)
+    x_norm = x[1] - inicenter[1]
+    y_norm = x[2] - inicenter[2]
+    r = sqrt(x_norm^2 + y_norm^2)
+    phi = atan(y_norm, x_norm)
+    sin_phi, cos_phi = sincos(phi)
 
-The classical isentropic vortex test case of
-- Chi-Wang Shu (1997)
-  Essentially Non-Oscillatory and Weighted Essentially Non-Oscillatory
-  Schemes for Hyperbolic Conservation Laws
-  [NASA/CR-97-206253](https://ntrs.nasa.gov/citations/19980007543)
-"""
-function initial_condition_isentropic_vortex(x, t, equations::CompressibleEulerEquations2D)
-    # Domain [-10, 10]^2; vortex advects with velocity (1, 1).
     RealT = eltype(x)
-    inicenter = SVector(zero(RealT), zero(RealT))
-    iniamplitude = 5
-    rho = one(RealT)
-    v1 = one(RealT)
-    v2 = one(RealT)
-    vel = SVector(v1, v2)
-    p = convert(RealT, 25)
-    rt = p / rho
-    domain_length = convert(RealT, 20)
-
-    cent = inicenter + vel * t
-    cent = x - cent
-    # Periodic wrap so the exact solution is valid at any t
-    cent = SVector(cent[1] - domain_length * round(cent[1] / domain_length),
-                   cent[2] - domain_length * round(cent[2] / domain_length))
-    cent = SVector(-cent[2], cent[1])
-    r2 = cent[1]^2 + cent[2]^2
-    du = iniamplitude / (2 * convert(RealT, pi)) * exp(0.5f0 * (1 - r2))
-    dtemp = -(equations.gamma - 1) / (2 * equations.gamma * rt) * du^2
-    rho = rho * (1 + dtemp)^(1 / (equations.gamma - 1))
-    vel = vel + du * cent
-    v1, v2 = vel
-    p = p * (1 + dtemp)^(equations.gamma / (equations.gamma - 1))
+    α = convert(RealT, blast_strength)
+    rho_in = 1 + α * convert(RealT, 0.1691)
+    v_in = α * convert(RealT, 0.1882)
+    p_in = 1 + α * convert(RealT, 0.245)
+    if r > 0.5f0
+        rho = one(RealT)
+        v1 = zero(RealT)
+        v2 = zero(RealT)
+        p = one(RealT)
+    else
+        rho = rho_in
+        v1 = v_in * cos_phi
+        v2 = v_in * sin_phi
+        p = p_in
+    end
     return prim2cons(SVector(rho, v1, v2, p), equations)
 end
-initial_condition = initial_condition_isentropic_vortex
+initial_condition = initial_condition_weaker_blast_wave
 
 polydeg = 3
 basis = LobattoLegendreBasis(polydeg)
@@ -87,7 +75,7 @@ if mortar_type == "l2"
     mortar = MortarL2(basis)
     surface_integral = SurfaceIntegralWeakForm(surface_flux)
 elseif mortar_nodes == "gauss"
-    mortar = MortarEntropy(basis; nodes = :gauss, reverse_quadrature = :gauss)
+    mortar = MortarEntropy(basis; nodes = :gauss)
     surface_integral = SurfaceIntegralWeakForm(surface_flux)
 else
     mortar = MortarEntropy(basis; nodes = :gauss_lobatto,
@@ -96,23 +84,22 @@ else
 end
 solver = DGSEM(basis, surface_integral, volume_integral, mortar)
 
-# Mesh switch (so `trixi_include` / `convergence_test` can override it):
+# Mesh switch (so `trixi_include` can override it):
 #   checkerboard = true  → 2:1 hanging faces (nmortars > 0)
 #   checkerboard = false → uniform conforming TreeMesh
-checkerboard = true
+checkerboard = false;
 
-coordinates_min = (-10.0, -10.0)
-coordinates_max = (10.0, 10.0)
-initial_refinement_level = 2
+coordinates_min = (-2.0, -2.0)
+coordinates_max = (2.0, 2.0)
+initial_refinement_level = 6
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
                 n_cells_max = 400_000, periodicity = true)
 
 if checkerboard
-    # Read the level from the tree so `convergence_test` overrides of
-    # `initial_refinement_level` still produce a scaled checkerboard.
-    level = mesh.tree.levels[first(Trixi.leaf_cells(mesh.tree))]
-    dx = (coordinates_max[1] - coordinates_min[1]) / 2^level
+    # Full checkerboard: hanging faces on every other cell, including periodic wraps.
+    n_base = 2^initial_refinement_level
+    dx = (coordinates_max[1] - coordinates_min[1]) / n_base
     cells_to_refine = Int[]
     for cell_id in Trixi.leaf_cells(mesh.tree)
         x, y = Trixi.cell_coordinates(mesh.tree, cell_id)
@@ -126,7 +113,7 @@ if checkerboard
 end
 
 # "ecav" → entropy-correction AV (combined hyperbolic + viscous RHS, mortar ψ
-#          residual). "none" → hyperbolic only.
+#          residual). "none" → hyperbolic flux differencing only.
 shock_capturing = "ecav"
 if shock_capturing == "ecav"
     # Identity filter: required by the constructor, unused for ECAV-only.
@@ -148,38 +135,33 @@ end
 ###############################################################################
 # ODE solvers, callbacks etc.
 
-tspan = (0.0, 1.2)
+tspan = (0.0, 0.4)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
-analysis_interval = 100
+analysis_interval = 300
 analysis_callback = AnalysisCallback(semi, interval = analysis_interval,
                                      extra_analysis_integrals = (entropy,))
 alive_callback = AliveCallback(analysis_interval = analysis_interval)
-stepsize_callback = StepsizeCallback(cfl = 0.8)
+save_solution = SaveSolutionCallback(interval = 300,
+                                     save_initial_solution = true,
+                                     save_final_solution = true,
+                                     solution_variables = cons2prim)
+cfl = 0.8
+stepsize_callback = StepsizeCallback(cfl = cfl)
 callbacks = CallbackSet(summary_callback, analysis_callback, alive_callback,
                         stepsize_callback)
 
-###############################################################################
-# run the simulation
+# `saveat` / `run_solve` are assignments so `trixi_include` can override them.
+saveat = 0.05
+run_solve = true
 
-# `dt` is overwritten by `StepsizeCallback`. Do not omit that callback with
-# CarpenterKennedy2N54 — a raw `dt = 1` is far too large for this mesh.
 sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
-            dt = 1.0, saveat = 0.05,
+            dt = 1.0, saveat = saveat,
             ode_default_options()..., callback = callbacks)
 
-# using Plots
-# pd = PlotData2D(sol)
-# plot(getmesh(pd), title = "mesh")
-# savefig("mesh.png")
-# plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
-# plot!(getmesh(pd))
-# savefig("rho.png")
-
-# Domain-integrated entropy at each saved solution time (same quadrature as AnalysisCallback).
 entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
-open("entropy_integral.csv", "w") do io
+open("blast_entropy_integral.csv", "w") do io
     println(io, "t,entropy")
     for (t, S) in zip(sol.t, entropy_integral)
         println(io, t, ",", S)
@@ -188,11 +170,13 @@ end
 println("entropy integral  S(0) = ", entropy_integral[1],
         "  S(end) = ", entropy_integral[end],
         "  ΔS = ", entropy_integral[end] - entropy_integral[1])
-
+try
     using Plots
     plot(sol.t, entropy_integral, xlabel = "t", ylabel = "∫ S dV / |Ω|",
-         legend = false, title = "entropy integral")
-    savefig("entropy_integral.png")
+         legend = false, title = "blast entropy integral")
+    savefig("blast_entropy_integral.png")
+catch e
+    println("Plots unavailable (", typeof(e), "); wrote blast_entropy_integral.csv")
+end
 
-    println("Plots unavailable (", typeof(e), "); wrote entropy_integral.csv")
 

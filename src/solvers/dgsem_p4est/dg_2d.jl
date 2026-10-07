@@ -1227,12 +1227,9 @@ end
 
     for position in 1:2
         element = neighbor_ids[position, mortar]
-        for i in eachnode(dg)
-            for v in eachvariable(equations)
-                surface_flux_values[v, i, small_direction, element] = fstar_primary[position][v,
-                                                                                              i]
-            end
-        end
+        copy_mortar_flux_to_small_element!(view(surface_flux_values, :, :, small_direction,
+                                                element),
+                                           fstar_primary[position], mortar_l2)
     end
 
     # Project small fluxes to large element.

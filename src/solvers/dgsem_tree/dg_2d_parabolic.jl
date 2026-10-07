@@ -266,7 +266,20 @@ function prolong2interfaces!(cache, flux_parabolic::Tuple,
                              mesh::TreeMesh{2},
                              equations_parabolic::AbstractEquationsParabolic,
                              dg::DGSEM{<:LobattoLegendreBasis},
-                             ::AbstractSurfaceIntegral)
+                             ::SurfaceIntegralWeakFormGauss)
+    prolong2interfaces!(cache, flux_parabolic, mesh, equations_parabolic, dg,
+                        Val(:lgl_copy))
+    if mortar_uses_gauss_nodes(dg)
+        interpolate_lgl_to_gauss_face_storage!(cache.interfaces.u, dg, cache)
+    end
+    return nothing
+end
+
+function prolong2interfaces!(cache, flux_parabolic::Tuple,
+                             mesh::TreeMesh{2},
+                             equations_parabolic::AbstractEquationsParabolic,
+                             dg::DGSEM{<:LobattoLegendreBasis},
+                             ::Union{AbstractSurfaceIntegral, Val{:lgl_copy}})
     @unpack interfaces = cache
     @unpack orientations, neighbor_ids = interfaces
     interfaces_u = interfaces.u
@@ -289,61 +302,6 @@ function prolong2interfaces!(cache, flux_parabolic::Tuple,
                                                                     left_element]
                 interfaces_u[2, v, i, interface] = flux_parabolic_y[v, i, 1,
                                                                     right_element]
-            end
-        end
-    end
-
-    return nothing
-end
-
-function prolong2interfaces!(cache, flux_parabolic::Tuple,
-                             mesh::TreeMesh{2},
-                             equations_parabolic::AbstractEquationsParabolic,
-                             dg::DGSEM{<:LobattoLegendreBasis},
-                             surface_integral::SurfaceIntegralWeakFormGaussQuad)
-    @unpack interfaces = cache
-    @unpack orientations, neighbor_ids = interfaces
-    @unpack lobatto2gauss = surface_integral
-    interfaces_u = interfaces.u
-    flux_parabolic_x, flux_parabolic_y = flux_parabolic
-
-    @threaded for interface in eachinterface(dg, cache)
-        left_element = neighbor_ids[1, interface]
-        right_element = neighbor_ids[2, interface]
-
-        if orientations[interface] == 1
-            for v in eachvariable(equations_parabolic)
-                for g in eachnode(dg)
-                    acc_left = zero(eltype(interfaces_u))
-                    acc_right = zero(eltype(interfaces_u))
-                    for k in eachnode(dg)
-                        acc_left = (acc_left +
-                                    lobatto2gauss[g, k] *
-                                    flux_parabolic_x[v, nnodes(dg), k, left_element])
-                        acc_right = (acc_right +
-                                     lobatto2gauss[g, k] *
-                                     flux_parabolic_x[v, 1, k, right_element])
-                    end
-                    interfaces_u[1, v, g, interface] = acc_left
-                    interfaces_u[2, v, g, interface] = acc_right
-                end
-            end
-        else
-            for v in eachvariable(equations_parabolic)
-                for g in eachnode(dg)
-                    acc_left = zero(eltype(interfaces_u))
-                    acc_right = zero(eltype(interfaces_u))
-                    for k in eachnode(dg)
-                        acc_left = (acc_left +
-                                    lobatto2gauss[g, k] *
-                                    flux_parabolic_y[v, k, nnodes(dg), left_element])
-                        acc_right = (acc_right +
-                                     lobatto2gauss[g, k] *
-                                     flux_parabolic_y[v, k, 1, right_element])
-                    end
-                    interfaces_u[1, v, g, interface] = acc_left
-                    interfaces_u[2, v, g, interface] = acc_right
-                end
             end
         end
     end
@@ -525,7 +483,20 @@ function prolong2boundaries!(cache, flux_parabolic::Tuple,
                              mesh::TreeMesh{2},
                              equations_parabolic::AbstractEquationsParabolic,
                              dg::DGSEM{<:LobattoLegendreBasis},
-                             ::AbstractSurfaceIntegral)
+                             ::SurfaceIntegralWeakFormGauss)
+    prolong2boundaries!(cache, flux_parabolic, mesh, equations_parabolic, dg,
+                        Val(:lgl_copy))
+    if mortar_uses_gauss_nodes(dg)
+        interpolate_lgl_to_gauss_face_storage!(cache.boundaries.u, dg, cache)
+    end
+    return nothing
+end
+
+function prolong2boundaries!(cache, flux_parabolic::Tuple,
+                             mesh::TreeMesh{2},
+                             equations_parabolic::AbstractEquationsParabolic,
+                             dg::DGSEM{<:LobattoLegendreBasis},
+                             ::Union{AbstractSurfaceIntegral, Val{:lgl_copy}})
     @unpack boundaries = cache
     @unpack orientations, neighbor_sides, neighbor_ids = boundaries
     boundaries_u = boundaries.u
@@ -556,78 +527,6 @@ function prolong2boundaries!(cache, flux_parabolic::Tuple,
                 for l in eachnode(dg), v in eachvariable(equations_parabolic)
                     boundaries_u[2, v, l, boundary] = flux_parabolic_y[v, l, 1,
                                                                        element]
-                end
-            end
-        end
-    end
-
-    return nothing
-end
-
-function prolong2boundaries!(cache, flux_parabolic::Tuple,
-                             mesh::TreeMesh{2},
-                             equations_parabolic::AbstractEquationsParabolic,
-                             dg::DGSEM{<:LobattoLegendreBasis},
-                             surface_integral::SurfaceIntegralWeakFormGaussQuad)
-    @unpack boundaries = cache
-    @unpack orientations, neighbor_sides, neighbor_ids = boundaries
-    @unpack lobatto2gauss = surface_integral
-    boundaries_u = boundaries.u
-    flux_parabolic_x, flux_parabolic_y = flux_parabolic
-
-    @threaded for boundary in eachboundary(dg, cache)
-        element = neighbor_ids[boundary]
-
-        if orientations[boundary] == 1
-            if neighbor_sides[boundary] == 1
-                for v in eachvariable(equations_parabolic)
-                    for g in eachnode(dg)
-                        acc = zero(eltype(boundaries_u))
-                        for k in eachnode(dg)
-                            acc = (acc +
-                                   lobatto2gauss[g, k] *
-                                   flux_parabolic_x[v, nnodes(dg), k, element])
-                        end
-                        boundaries_u[1, v, g, boundary] = acc
-                    end
-                end
-            else
-                for v in eachvariable(equations_parabolic)
-                    for g in eachnode(dg)
-                        acc = zero(eltype(boundaries_u))
-                        for k in eachnode(dg)
-                            acc = (acc +
-                                   lobatto2gauss[g, k] *
-                                   flux_parabolic_x[v, 1, k, element])
-                        end
-                        boundaries_u[2, v, g, boundary] = acc
-                    end
-                end
-            end
-        else
-            if neighbor_sides[boundary] == 1
-                for v in eachvariable(equations_parabolic)
-                    for g in eachnode(dg)
-                        acc = zero(eltype(boundaries_u))
-                        for k in eachnode(dg)
-                            acc = (acc +
-                                   lobatto2gauss[g, k] *
-                                   flux_parabolic_y[v, k, nnodes(dg), element])
-                        end
-                        boundaries_u[1, v, g, boundary] = acc
-                    end
-                end
-            else
-                for v in eachvariable(equations_parabolic)
-                    for g in eachnode(dg)
-                        acc = zero(eltype(boundaries_u))
-                        for k in eachnode(dg)
-                            acc = (acc +
-                                   lobatto2gauss[g, k] *
-                                   flux_parabolic_y[v, k, 1, element])
-                        end
-                        boundaries_u[2, v, g, boundary] = acc
-                    end
                 end
             end
         end
@@ -963,7 +862,7 @@ function prolong2mortars!(cache, flux_parabolic::Tuple,
                           dg::DGSEM)
     flux_parabolic_x, flux_parabolic_y = flux_parabolic
     nodes = mortar_nodes(mortar_l2)
-    lobatto2gauss = nodes isa Val{:gauss} ? lobatto2gauss_interpolation(dg) : nothing
+    lobatto2gauss = mortar_lobatto2gauss(mortar_l2, dg)
 
     @threaded for mortar in eachmortar(dg, cache)
         large_element = cache.mortars.neighbor_ids[3, mortar]
@@ -1153,8 +1052,12 @@ end
             direction = 4
         end
     end
-    surface_flux_values[:, :, direction, upper_element] .= fstar_upper
-    surface_flux_values[:, :, direction, lower_element] .= fstar_lower
+    copy_mortar_flux_to_small_element!(view(surface_flux_values, :, :, direction,
+                                            upper_element),
+                                       fstar_upper, mortar_l2)
+    copy_mortar_flux_to_small_element!(view(surface_flux_values, :, :, direction,
+                                            lower_element),
+                                       fstar_lower, mortar_l2)
 
     # Project small fluxes to large element
     if cache.mortars.large_sides[mortar] == 1 # -> large element on left side
@@ -1337,39 +1240,37 @@ end
 function calc_surface_integral_gradient!(gradients,
                                          mesh::TreeMesh{2}, # for dispatch only
                                          equations_parabolic::AbstractEquationsParabolic,
-                                         surface_integral::SurfaceIntegralWeakFormGaussQuad,
-                                         dg::DGSEM, cache)
+                                         ::SurfaceIntegralWeakFormGauss,
+                                         dg::DGSEM{<:LobattoLegendreBasis}, cache)
     @unpack inverse_weights = dg.basis
     @unpack surface_flux_values = cache.elements
-    @unpack gauss2lobatto = surface_integral
+    Q = gauss_sat_face_matrix(dg)
+    factor = inverse_weights[1]
+    n = nnodes(dg)
+    gauss_fstar = mortar_uses_gauss_nodes(dg)
 
     gradients_x, gradients_y = gradients
-    factor = inverse_weights[1]
 
     @threaded for element in eachelement(dg, cache)
-        for v in eachvariable(equations_parabolic)
-            for l in eachnode(dg)
-                f_left = zero(eltype(gradients_x))
-                f_right = zero(eltype(gradients_x))
-                f_bottom = zero(eltype(gradients_y))
-                f_top = zero(eltype(gradients_y))
-                for g in eachnode(dg)
-                    V = gauss2lobatto[l, g]
-                    f_left += V * surface_flux_values[v, g, 1, element]
-                    f_right += V * surface_flux_values[v, g, 2, element]
-                    f_bottom += V * surface_flux_values[v, g, 3, element]
-                    f_top += V * surface_flux_values[v, g, 4, element]
+        for l in eachnode(dg)
+            scale = gauss_fstar ? factor * inverse_weights[l] : factor
+            for v in eachvariable(equations_parabolic)
+                g1 = g2 = g3 = g4 = zero(eltype(gradients_x))
+                for k in eachnode(dg)
+                    g1 += Q[l, k] * surface_flux_values[v, k, 1, element]
+                    g2 += Q[l, k] * surface_flux_values[v, k, 2, element]
+                    g3 += Q[l, k] * surface_flux_values[v, k, 3, element]
+                    g4 += Q[l, k] * surface_flux_values[v, k, 4, element]
                 end
+
                 gradients_x[v, 1, l, element] = (gradients_x[v, 1, l, element] -
-                                                 f_left * factor)
-                gradients_x[v, nnodes(dg), l, element] = (gradients_x[v, nnodes(dg), l,
-                                                                      element] +
-                                                          f_right * factor)
+                                                 g1 * scale)
+                gradients_x[v, n, l, element] = (gradients_x[v, n, l, element] +
+                                                 g2 * scale)
                 gradients_y[v, l, 1, element] = (gradients_y[v, l, 1, element] -
-                                                 f_bottom * factor)
-                gradients_y[v, l, nnodes(dg), element] = (gradients_y[v, l, nnodes(dg),
-                                                                      element] +
-                                                          f_top * factor)
+                                                 g3 * scale)
+                gradients_y[v, l, n, element] = (gradients_y[v, l, n, element] +
+                                                 g4 * scale)
             end
         end
     end

@@ -15,13 +15,43 @@
 
         sensor = Array{uEltype, 5}(undef, n_vars, n_nodes, n_nodes, n_nodes, n_elements)
         max_coeff = Float64[]
+        # Bit i (0-based) marks hanging face direction i+1 of that element.
+        hanging_faces = zeros(UInt8, n_elements)
         #velocity_data = Array{uEltype, 5}(undef, n_vars, n_nodes, n_nodes, n_nodes, n_elements)
-        cache = (; sensor, max_coeff, coefficients, svv_coefficients, norm_residuals)
+        cache = (; sensor, max_coeff, coefficients, svv_coefficients, norm_residuals,
+                 hanging_faces)
         return cache
     end
 
+    @inline function get_mortar_node_vars(u_mortar, equations, dg, leftright, i, mortar)
+        return SVector(ntuple(@inline(v -> u_mortar[leftright, v, i, mortar]),
+                              Val(nvariables(equations))))
+    end
+
+    # Quadrature weights at the nodes where `prolong2mortars!` stores traces / Riemann states.
+    @inline function mortar_quadrature_weights(mortar, dg)
+        if mortar_nodes(mortar) isa Val{:gauss}
+            _, weights = gauss_nodes_weights(nnodes(dg), real(dg))
+            return weights
+        else
+            return dg.basis.weights
+        end
+    end
+
+    @inline function get_face_node_vars(u, equations, dg, element, direction, k)
+        if direction == 1
+            return get_node_vars(u, equations, dg, 1, k, element)
+        elseif direction == 2
+            return get_node_vars(u, equations, dg, nnodes(dg), k, element)
+        elseif direction == 3
+            return get_node_vars(u, equations, dg, k, 1, element)
+        else
+            return get_node_vars(u, equations, dg, k, nnodes(dg), element)
+        end
+    end
+
     function calc_volume_entropy_residual(du, u, element, mesh::TreeMesh{2}, equations, dg,
-                                          cache)
+                                          cache, hanging_faces)
 
         # calculate volume integral
         volume_integral_du_entropy = zero(real(dg))
@@ -36,32 +66,28 @@
                                          weight_ij
         end
 
-        # calculate surface integral
+        # Conforming (and boundary) faces: LGL quadrature of ψ(u), matching LGL SAT.
+        # Hanging faces are omitted here and added with mortar quadrature in
+        # `add_mortar_entropy_potential!`.
         surface_integral_entropy_potential = zero(real(dg))
-        for ii in eachnode(dg)
-            # x direction
-            u_left = get_node_vars(u, equations, dg, 1, ii, element)
-            u_right = get_node_vars(u, equations, dg, nnodes(dg), ii, element)
-            surface_integral_entropy_potential = surface_integral_entropy_potential +
-                                                 dg.basis.weights[ii] *
-                                                 (entropy_potential(u_right,
-                                                                    SVector(1.0f0, 0.0f0),
-                                                                    equations) +
-                                                  entropy_potential(u_left,
-                                                                    SVector(-1.0f0, 0.0f0),
-                                                                    equations))
-
-            # y direction
-            u_left = get_node_vars(u, equations, dg, ii, 1, element)
-            u_right = get_node_vars(u, equations, dg, ii, nnodes(dg), element)
-            surface_integral_entropy_potential = surface_integral_entropy_potential +
-                                                 dg.basis.weights[ii] *
-                                                 (entropy_potential(u_right,
-                                                                    SVector(0.0f0, 1.0f0),
-                                                                    equations) +
-                                                  entropy_potential(u_left,
-                                                                    SVector(0.0f0, -1.0f0),
-                                                                    equations))
+        for direction in (1, 2, 3, 4)
+            is_hanging_face(hanging_faces, element, direction) && continue
+            normal = if direction == 1
+                SVector(-1.0f0, 0.0f0)
+            elseif direction == 2
+                SVector(1.0f0, 0.0f0)
+            elseif direction == 3
+                SVector(0.0f0, -1.0f0)
+            else
+                SVector(0.0f0, 1.0f0)
+            end
+            for ii in eachnode(dg)
+                u_node = get_face_node_vars(u, equations, dg, element, direction, ii)
+                surface_integral_entropy_potential = surface_integral_entropy_potential +
+                                                     dg.basis.weights[ii] *
+                                                     entropy_potential(u_node, normal,
+                                                                       equations)
+            end
         end
 
         # by default, the volume_integral contribution to du does not scale by any geometric terms
@@ -71,6 +97,115 @@
         jacobian_1d = inv(cache.elements.inverse_jacobian[element]) # O(h) 
         return (volume_integral_du_entropy + surface_integral_entropy_potential) *
                jacobian_1d
+    end
+
+    # ∫ ψ n dS on hanging faces, using the same mortar traces and weights as f*.
+    # Large face: composite half-interval quadrature (factor 1/2). Do not reverse-project ψ.
+    function add_mortar_entropy_potential!(entropy_residual, mesh::TreeMesh{2},
+                                           equations, dg, cache)
+        mortar = dg.mortar
+        weights = mortar_quadrature_weights(mortar, dg)
+        mortars = cache.mortars
+        inverse_jacobian = cache.elements.inverse_jacobian
+
+        for mortar_id in eachmortar(dg, cache)
+            large_element = mortars.neighbor_ids[3, mortar_id]
+            upper_element = mortars.neighbor_ids[2, mortar_id]
+            lower_element = mortars.neighbor_ids[1, mortar_id]
+            orientation = mortars.orientations[mortar_id]
+            large_sides = mortars.large_sides[mortar_id]
+
+            # large_sides = 1 means the large face on the left, 2 means on the right
+            if large_sides == 1
+                normal_large = orientation == 1 ? SVector(1.0f0, 0.0f0) :
+                               SVector(0.0f0, 1.0f0)
+                leftright_large = 1
+                leftright_small = 2
+            else
+                normal_large = orientation == 1 ? SVector(-1.0f0, 0.0f0) :
+                               SVector(0.0f0, -1.0f0)
+                leftright_large = 2
+                leftright_small = 1
+            end
+            normal_small = -normal_large
+
+            psi_large = zero(eltype(entropy_residual))
+            psi_upper = zero(eltype(entropy_residual))
+            psi_lower = zero(eltype(entropy_residual))
+            for j in eachnode(dg)
+                u_upper_large = get_mortar_node_vars(mortars.u_upper, equations, dg,
+                                                     leftright_large, j, mortar_id)
+                u_lower_large = get_mortar_node_vars(mortars.u_lower, equations, dg,
+                                                     leftright_large, j, mortar_id)
+                u_upper_small = get_mortar_node_vars(mortars.u_upper, equations, dg,
+                                                     leftright_small, j, mortar_id)
+                u_lower_small = get_mortar_node_vars(mortars.u_lower, equations, dg,
+                                                     leftright_small, j, mortar_id)
+                psi_large = psi_large +
+                            weights[j] *
+                            (entropy_potential(u_upper_large, normal_large, equations) +
+                             entropy_potential(u_lower_large, normal_large, equations))
+                psi_upper = psi_upper +
+                            weights[j] *
+                            entropy_potential(u_upper_small, normal_small, equations)
+                psi_lower = psi_lower +
+                            weights[j] *
+                            entropy_potential(u_lower_small, normal_small, equations)
+            end
+
+            # Half-interval map on the large face: ds_large = (1/2) dη per small mortar.
+            entropy_residual[large_element] = entropy_residual[large_element] +
+                                              0.5f0 * psi_large *
+                                              inv(inverse_jacobian[large_element])
+            entropy_residual[upper_element] = entropy_residual[upper_element] +
+                                              psi_upper *
+                                              inv(inverse_jacobian[upper_element])
+            entropy_residual[lower_element] = entropy_residual[lower_element] +
+                                              psi_lower *
+                                              inv(inverse_jacobian[lower_element])
+        end
+
+        return nothing
+    end
+
+    function calc_entropy_residuals!(entropy_residual, du, u, mesh::TreeMesh{2},
+                                     equations, dg, cache)
+        hanging_faces = cache.artificial_viscosity.hanging_faces
+        n_elements = nelements(dg, cache)
+        if length(hanging_faces) != n_elements
+            resize!(hanging_faces, n_elements)
+        end
+
+        mortar = dg.mortar
+        has_mortars = mortar isa Union{LobattoLegendreMortarL2,
+                                       LobattoLegendreMortarEntropy} &&
+                      !isempty(eachmortar(dg, cache))
+        if has_mortars
+            mark_hanging_faces!(hanging_faces, dg, cache)
+        else
+            fill!(hanging_faces, 0x00)
+        end
+
+        @threaded for element in eachelement(dg, cache)
+            entropy_residual[element] = calc_volume_entropy_residual(du, u, element,
+                                                                     mesh, equations,
+                                                                     dg, cache,
+                                                                     hanging_faces)
+        end
+        if has_mortars
+            add_mortar_entropy_potential!(entropy_residual, mesh, equations, dg, cache)
+        end
+
+        return nothing
+    end
+
+    function prolong2mortars_for_entropy_residual!(cache, u, mesh, equations, dg)
+        mortar = dg.mortar
+        if mortar isa Union{LobattoLegendreMortarL2, LobattoLegendreMortarEntropy} &&
+           !isempty(eachmortar(dg, cache))
+            prolong2mortars!(cache, u, mesh, equations, mortar, dg)
+        end
+        return nothing
     end
 
     function calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
@@ -105,6 +240,8 @@
             # flip the sign to account for the fact that viscous terms are negated by convention in Trixi.jl.
             ecav_coefficient = regularized_ratio(min(0, entropy_residual[element]),
                                                  element_viscous_dissipation)
+            ecav_coefficient = entropy_residual[element] /
+                                                  element_viscous_dissipation
             #ecav_coefficient = 0.0
             cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
             for j in eachnode(dg), i in eachnode(dg)
@@ -146,12 +283,12 @@
                                   dg.volume_integral, dg, cache)
         end
 
+        # Mortar traces are needed for hanging-face ψ quadrature in the residual.
+        prolong2mortars_for_entropy_residual!(cache, u, mesh, equations, dg)
+
         # calculate entropy residual
         entropy_residual = cache.artificial_viscosity.coefficients # reuse storage
-        @threaded for element in eachelement(dg, cache)
-            entropy_residual[element] = calc_volume_entropy_residual(du, u, element, mesh,
-                                                                     equations, dg, cache)
-        end
+        calc_entropy_residuals!(entropy_residual, du, u, mesh, equations, dg, cache)
         # Prolong solution to interfaces
         @trixi_timeit_ext backend timer() "prolong2interfaces" begin
             prolong2interfaces!(backend, cache, u, mesh, equations, dg)
@@ -252,12 +389,14 @@
                                   dg.volume_integral, dg, cache)
         end
 
+        # Mortar traces are needed for hanging-face ψ quadrature in the residual.
+        @trixi_timeit_ext backend timer() "prolong2mortars+entropy_residual" begin
+            prolong2mortars_for_entropy_residual!(cache, u, mesh, equations, dg)
+        end
+
         # calculate entropy residual
         entropy_residual = cache.artificial_viscosity.coefficients # reuse storage
-        @threaded for element in eachelement(dg, cache)
-            entropy_residual[element] = calc_volume_entropy_residual(du, u, element, mesh,
-                                                                     equations, dg, cache)
-        end
+        calc_entropy_residuals!(entropy_residual, du, u, mesh, equations, dg, cache)
         #push!(cache.artificial_viscosity.max_coeff, maximum(-min.(0.0, entropy_residual)))
 
         # Prolong solution to interfaces
@@ -283,10 +422,7 @@
                                 dg.surface_integral, dg)
         end
 
-        # Prolong solution to mortars
-        @trixi_timeit timer() "prolong2mortars" begin
-            prolong2mortars!(cache, u, mesh, equations, dg.mortar, dg)
-        end
+        # Mortar traces were already filled before the entropy residual.
 
         # Calculate mortar fluxes
         @trixi_timeit timer() "mortar flux" begin

@@ -233,12 +233,17 @@ end
 
 struct LobattoLegendreMortarEntropy{RealT <: Real, NNODES, Nodes,
                                     ForwardMatrix <: AbstractMatrix{RealT},
-                                    ReverseMatrix <: AbstractMatrix{RealT}} <:
+                                    ReverseMatrix <: AbstractMatrix{RealT},
+                                    InterpMatrix <: AbstractMatrix{RealT}} <:
        AbstractMortarEntropy{RealT}
     forward_upper::ForwardMatrix
     forward_lower::ForwardMatrix
     reverse_upper::ReverseMatrix
     reverse_lower::ReverseMatrix
+    # Cached I_{Gauss → LGL}. Identity when mortar nodes are already LGL.
+    gauss2lobatto::InterpMatrix
+    # Cached I_{LGL → Gauss}. Used when `nodes = :gauss`; identity otherwise.
+    lobatto2gauss::InterpMatrix
 end
 
 function Adapt.adapt_structure(to, mortar::LobattoLegendreMortarEntropy{RealT, NNODES,
@@ -249,53 +254,97 @@ function Adapt.adapt_structure(to, mortar::LobattoLegendreMortarEntropy{RealT, N
     forward_lower = adapt(to, mortar.forward_lower)
     reverse_upper = adapt(to, mortar.reverse_upper)
     reverse_lower = adapt(to, mortar.reverse_lower)
+    gauss2lobatto = adapt(to, mortar.gauss2lobatto)
+    lobatto2gauss = adapt(to, mortar.lobatto2gauss)
     return LobattoLegendreMortarEntropy{eltype(forward_upper), nnodes(mortar), Nodes,
                                         typeof(forward_upper),
-                                        typeof(reverse_upper)}(forward_upper, forward_lower,
-                                                               reverse_upper, reverse_lower)
+                                        typeof(reverse_upper),
+                                        typeof(lobatto2gauss)}(forward_upper, forward_lower,
+                                                               reverse_upper, reverse_lower,
+                                                               gauss2lobatto, lobatto2gauss)
 end
 
 """
-    MortarEntropy(basis::LobattoLegendreBasis; nodes = :gauss_lobatto)
-    MortarEntropy(polydeg::Integer; nodes = :gauss_lobatto)
+    MortarEntropy(basis::LobattoLegendreBasis; nodes = :gauss_lobatto,
+                  reverse_quadrature = :gauss)
+    MortarEntropy(polydeg::Integer; nodes = :gauss_lobatto,
+                  reverse_quadrature = :gauss)
 
 Create a mortar that interpolates traces in entropy variables.
 
-- `nodes = :gauss_lobatto`: convert to entropy at LGL, interpolate the large
-  face with LGL maps, reverse L2 back to LGL (Gauss quadrature sandwich).
-  Pair with the default LGL surface integral (`DGSEM(basis, surface_flux, ...)`).
-- `nodes = :gauss`: convert to entropy at LGL, interpolate to Gauss, Gauss
-  forward/reverse. Pair with [`SurfaceIntegralWeakFormGaussQuad`](@ref).
+- `nodes = :gauss_lobatto` (default): convert to entropy at LGL, interpolate the
+  large face with the same LGL maps as [`MortarL2`](@ref) so hanging-face LGL
+  nodes line up, and compute the Riemann flux at those LGL nodes.
+  `reverse_quadrature = :gauss` interpolates that LGL flux interpolant to Gauss
+  nodes and evaluates the face integral with Gauss quadrature (exact for the
+  P_N * P_N product), then L²-projects onto the large LGL face. Small-face
+  fluxes are already at LGL and are copied.   `reverse_quadrature = :gauss_lobatto`
+  uses LGL-mass reverse and also copies small-face fluxes. Pair with the default
+  LGL surface integral (`SurfaceIntegralWeakForm` / `DGSEM(basis, surface_flux, ...)`).
+- `nodes = :gauss`: convert to entropy at LGL, interpolate to Gauss, Riemann
+  at Gauss nodes.
+  `reverse_quadrature = :gauss` L²-projects in Gauss space with
+  `P = M_f^{-1} I^T M_m`, `M_f = W_G`, `M_m = W_G / 2`, and copies small-face
+  Gauss `f*`. Pair with [`SurfaceIntegralWeakFormGauss`](@ref): lift
+  `L = I_{L→G}^T W_G`, then lumped `M^{-1}`.
+  `reverse_quadrature = :gauss_lobatto` uses `M_f = W_LGL`,
+  `M_m = W_G / 2` (`P = W_LGL^{-1} I_{L→G,half}^T (W_G/2)`), mapping Gauss `f*`
+  onto the large LGL face, and interpolates small-face fluxes to LGL. Pair with
+  the default LGL SAT (`SurfaceIntegralWeakForm`, `f*/ω`).
 """
-function MortarEntropy(basis::LobattoLegendreBasis; nodes::Symbol = :gauss_lobatto)
+function MortarEntropy(basis::LobattoLegendreBasis; nodes::Symbol = :gauss_lobatto,
+                       reverse_quadrature::Symbol = :gauss)
     if nodes !== :gauss && nodes !== :gauss_lobatto
         throw(ArgumentError("`nodes` must be `:gauss` or `:gauss_lobatto`, got $(repr(nodes))"))
+    end
+    if reverse_quadrature !== :gauss && reverse_quadrature !== :gauss_lobatto
+        throw(ArgumentError("`reverse_quadrature` must be `:gauss` or `:gauss_lobatto`, got $(repr(reverse_quadrature))"))
     end
 
     RealT = real(basis)
     nnodes_ = nnodes(basis)
     node_val = Val(nodes)
+    gauss_nodes, _ = gauss_nodes_weights(nnodes_, RealT)
+    lobatto2gauss = polynomial_interpolation_matrix(basis.nodes, gauss_nodes)
 
     if nodes === :gauss
         forward_upper = calc_forward_upper(nnodes_, Val(:gauss), RealT)
         forward_lower = calc_forward_lower(nnodes_, Val(:gauss), RealT)
-        reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_nodes), RealT)
-        reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_nodes), RealT)
+        if reverse_quadrature === :gauss_lobatto
+            # `M_f = W_LGL`: project Gauss `f*` onto LGL, interpolate small faces.
+            gauss2lobatto = polynomial_interpolation_matrix(gauss_nodes, basis.nodes)
+            reverse_upper = mortar_l2_reverse_lgl_mass_from_gauss(nnodes_, +1, RealT)
+            reverse_lower = mortar_l2_reverse_lgl_mass_from_gauss(nnodes_, -1, RealT)
+        else
+            # `M_f = W_G`: Gauss `f*` stays at Gauss; identity copy of small faces.
+            gauss2lobatto = calc_identity_matrix(nnodes_, RealT)
+            reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_nodes), RealT)
+            reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_nodes), RealT)
+        end
     else
+        gauss2lobatto = calc_identity_matrix(nnodes_, RealT)
         forward_upper = calc_forward_upper(nnodes_, RealT)
         forward_lower = calc_forward_lower(nnodes_, RealT)
-        reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_lobatto), RealT)
-        reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_lobatto), RealT)
+        if reverse_quadrature === :gauss_lobatto
+            reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_lobatto), RealT)
+            reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_lobatto), RealT)
+        else
+            reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_quad), RealT)
+            reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_quad), RealT)
+        end
     end
 
     return LobattoLegendreMortarEntropy{RealT, nnodes_, typeof(node_val),
                                         typeof(forward_upper),
-                                        typeof(reverse_upper)}(forward_upper, forward_lower,
-                                                               reverse_upper, reverse_lower)
+                                        typeof(reverse_upper),
+                                        typeof(lobatto2gauss)}(forward_upper, forward_lower,
+                                                               reverse_upper, reverse_lower,
+                                                               gauss2lobatto, lobatto2gauss)
 end
 
-MortarEntropy(polydeg::Integer; nodes::Symbol = :gauss_lobatto) = MortarEntropy(LobattoLegendreBasis(polydeg);
-                                                                               nodes = nodes)
+function MortarEntropy(polydeg::Integer; kwargs...)
+    return MortarEntropy(LobattoLegendreBasis(polydeg); kwargs...)
+end
 
 @inline mortar_nodes(::LobattoLegendreMortarEntropy{RealT, NNODES, Nodes}) where {RealT,
                                                                                   NNODES,
@@ -326,6 +375,18 @@ end
 end
 
 @inline polydeg(mortar::LobattoLegendreMortarEntropy) = nnodes(mortar) - 1
+
+@inline function copy_mortar_flux_to_small_element!(dest, fstar,
+                                                    ::LobattoLegendreMortarL2)
+    dest .= fstar
+    return nothing
+end
+
+@inline function copy_mortar_flux_to_small_element!(dest, fstar,
+                                                    mortar::LobattoLegendreMortarEntropy)
+    multiply_dimensionwise!(dest, mortar.gauss2lobatto, fstar)
+    return nothing
+end
 
 # TODO: We can create EC mortars along the lines of the following implementation.
 # abstract type AbstractMortarEC{RealT} <: AbstractMortar{RealT} end
