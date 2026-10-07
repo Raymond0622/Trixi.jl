@@ -5,6 +5,9 @@
 @muladd begin
 #! format: noindent
 
+# In contrast to the containers for the `TreeMesh` the containers for the `P4estMesh` are
+# implemented for both 2D (`NDIMS = 2`) and 3D (`NDIMS = 3`) using a single data structure.
+
 mutable struct P4estElementContainer{NDIMS, RealT <: Real, uEltype <: Real,
                                      NDIMSP1, NDIMSP2, NDIMSP3,
                                      ArrayRealTNDIMSP1 <: DenseArray{RealT, NDIMSP1},
@@ -16,20 +19,30 @@ mutable struct P4estElementContainer{NDIMS, RealT <: Real, uEltype <: Real,
                                      VectoruEltype <: DenseVector{uEltype}} <:
                AbstractElementContainer
     # Physical coordinates at each node
-    node_coordinates::ArrayRealTNDIMSP2 # [orientation, node_i, node_j, node_k, element]
+    # 2D: [orientation, node_i, node_j, element]
+    # 3D: [orientation, node_i, node_j, node_k, element]
+    node_coordinates::ArrayRealTNDIMSP2
 
     # Jacobian matrix of the transformation
-    # [jacobian_i, jacobian_j, node_i, node_j, node_k, element] where jacobian_i is the first index of the Jacobian matrix
+    # 2D: [jacobian_i, jacobian_j, node_i, node_j, element]
+    # 3D: [jacobian_i, jacobian_j, node_i, node_j, node_k, element]
+    # where jacobian_i is the first index of the Jacobian matrix
     jacobian_matrix::ArrayRealTNDIMSP3
 
     # Contravariant vectors, scaled by J, in Kopriva's blue book called Ja^i_n (i index, n dimension)
-    contravariant_vectors::ArrayRealTNDIMSP3 # [dimension, index, node_i, node_j, node_k, element]
+    # 2D: [dimension, index, node_i, node_j, element]
+    # 3D: [dimension, index, node_i, node_j, node_k, element]
+    contravariant_vectors::ArrayRealTNDIMSP3
 
     # 1/J where J is the Jacobian determinant (determinant of Jacobian matrix)
-    inverse_jacobian::ArrayRealTNDIMSP1 # [node_i, node_j, node_k, element]
+    # 2D: [node_i, node_j, element]
+    # 3D: [node_i, node_j, node_k, element]
+    inverse_jacobian::ArrayRealTNDIMSP1
 
     # Buffer for calculated surface flux
-    surface_flux_values::ArrayuEltypeNDIMSP2 # [variable, i, j, direction, element]
+    # 2D: [variable, node_i, direction, element]
+    # 3D: [variable, node_i, node_j, direction, element]
+    surface_flux_values::ArrayuEltypeNDIMSP2
 
     # internal `resize!`able storage
     _node_coordinates::VectorRealT
@@ -49,6 +62,34 @@ end
                                                                                     uEltype
                                                                                     }
     return uEltype
+end
+
+# Check whether the arrays in `elements` have the axes we assume it must have in the inner loops
+# of Trixi.jl.
+function check_axes(elements::P4estElementContainer{NDIMS}, equations,
+                    solver::DG, cache) where {NDIMS}
+    node_axes = ntuple(_ -> eachnode(solver), NDIMS)
+    check_axes(elements.node_coordinates,
+               (Base.OneTo(NDIMS),
+                node_axes...,
+                eachelement(solver, cache)))
+    check_axes(elements.jacobian_matrix,
+               (Base.OneTo(NDIMS), Base.OneTo(NDIMS),
+                node_axes...,
+                eachelement(solver, cache)))
+    check_axes(elements.contravariant_vectors,
+               (Base.OneTo(NDIMS), Base.OneTo(NDIMS),
+                node_axes...,
+                eachelement(solver, cache)))
+    check_axes(elements.inverse_jacobian,
+               (node_axes...,
+                eachelement(solver, cache)))
+    check_axes(elements.surface_flux_values,
+               (eachvariable(equations),
+                ntuple(_ -> eachnode(solver), NDIMS - 1)...,
+                Base.OneTo(2 * NDIMS),
+                eachelement(solver, cache)))
+    return nothing
 end
 
 # Only one-dimensional `Array`s are `resize!`able in Julia.
@@ -225,10 +266,18 @@ mutable struct P4estInterfaceContainer{NDIMS, RealT <: Real, uEltype <: Real,
                                        IndicesVector <:
                                        DenseVector{NTuple{NDIMS, Symbol}}} <:
                AbstractInterfaceContainer
-    u::uArray                      # [primary/secondary, variable, i, j, interface]
-    normal_directions::NormalArray # [dimension, i, j, interface]
-    neighbor_ids::IdsMatrix        # [primary/secondary, interface]
-    node_indices::IndicesMatrix    # [primary/secondary, interface]
+    # 2D: [primary/secondary, variable, i, interface]
+    # 3D: [primary/secondary, variable, i, j, interface]
+    u::uArray
+
+    # 2D: [dimension, i, interface]
+    # 3D: [dimension, i, j, interface]
+    normal_directions::NormalArray
+
+    # 2D/3D: [primary/secondary, interface]
+    neighbor_ids::IdsMatrix
+    # 2D/3D: [primary/secondary, interface]
+    node_indices::IndicesMatrix
 
     # internal `resize!`able storage
     _u::uVector
@@ -248,6 +297,26 @@ end
     return size(interfaces.neighbor_ids, 2)
 end
 @inline Base.ndims(::P4estInterfaceContainer{NDIMS}) where {NDIMS} = NDIMS
+
+# Check whether the arrays in `interfaces` have the axes we assume it must have in the inner loops
+# of Trixi.jl.
+function check_axes(interfaces::P4estInterfaceContainer{NDIMS}, equations,
+                    solver::DG, cache) where {NDIMS}
+    surface_node_axes = ntuple(_ -> eachnode(solver), NDIMS - 1)
+    check_axes(interfaces.u,
+               (Base.OneTo(2), eachvariable(equations),
+                surface_node_axes...,
+                eachinterface(solver, cache)))
+    if interfaces.normal_directions !== nothing
+        check_axes(interfaces.normal_directions,
+                   (Base.OneTo(NDIMS),
+                    surface_node_axes...,
+                    eachinterface(solver, cache)))
+    end
+    check_axes(interfaces.neighbor_ids, (Base.OneTo(2), eachinterface(solver, cache)))
+    check_axes(interfaces.node_indices, (Base.OneTo(2), eachinterface(solver, cache)))
+    return nothing
+end
 
 # See explanation of Base.resize! for the element container
 function Base.resize!(interfaces::P4estInterfaceContainer, capacity)
@@ -400,10 +469,18 @@ mutable struct P4estBoundaryContainer{NDIMS, uEltype <: Real, NDIMSP1,
                                       DenseVector{NTuple{NDIMS, Symbol}},
                                       uVector <: DenseVector{uEltype}} <:
                AbstractBoundaryContainer
-    u::uArray                   # [variables, i, j, boundary]
-    neighbor_ids::IdsVector     # [boundary]
-    node_indices::IndicesVector # [boundary]
-    name::Vector{Symbol}        # [boundary]
+    # 2D: [variable, i, boundary]
+    # 3D: [variable, i, j, boundary]
+    u::uArray
+
+    # 2D/3D: [boundary]
+    neighbor_ids::IdsVector
+
+    # 2D/3D: [boundary]
+    node_indices::IndicesVector
+
+    # 2D/3D: [boundary]
+    name::Vector{Symbol}
 
     # internal `resize!`able storage
     _u::uVector
@@ -416,6 +493,20 @@ end
 @inline function Base.eltype(::P4estBoundaryContainer{NDIMS, uEltype}) where {NDIMS,
                                                                               uEltype}
     return uEltype
+end
+
+# Check whether the arrays in `boundaries` have the axes we assume it must have in the inner loops
+# of Trixi.jl.
+function check_axes(boundaries::P4estBoundaryContainer{NDIMS}, equations,
+                    solver::DG, cache) where {NDIMS}
+    check_axes(boundaries.u,
+               (eachvariable(equations),
+                ntuple(_ -> eachnode(solver), NDIMS - 1)...,
+                eachboundary(solver, cache)))
+    check_axes(boundaries.neighbor_ids, (eachboundary(solver, cache),))
+    check_axes(boundaries.node_indices, (eachboundary(solver, cache),))
+    check_axes(boundaries.name, (eachboundary(solver, cache),))
+    return nothing
 end
 
 # See explanation of Base.resize! for the element container
@@ -566,9 +657,16 @@ mutable struct P4estMortarContainer{NDIMS, uEltype <: Real, NDIMSP1, NDIMSP3,
                                     IndicesVector <:
                                     DenseVector{NTuple{NDIMS, Symbol}}} <:
                AbstractMortarContainer
-    u::uArray # [small/large side, variable, position, i, j, mortar]
-    neighbor_ids::IdsMatrix # [position, mortar]
-    node_indices::IndicesMatrix # [small/large, mortar]
+
+    # 2D: [small/large side, variable, position, i, mortar]
+    # 3D: [small/large side, variable, position, i, j, mortar]
+    u::uArray
+
+    # 2D/3D: [position, mortar]
+    neighbor_ids::IdsMatrix
+
+    # 2D/3D: [small/large side, mortar]
+    node_indices::IndicesMatrix
 
     # internal `resize!`able storage
     _u::uVector

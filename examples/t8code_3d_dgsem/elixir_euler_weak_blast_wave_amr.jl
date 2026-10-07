@@ -100,7 +100,11 @@ amr_controller = ControllerThreeLevel(semi, amr_indicator,
 amr_callback = AMRCallback(semi, amr_controller,
                            interval = 1,
                            adapt_initial_condition = false,
-                           adapt_initial_condition_only_refine = false)
+                           adapt_initial_condition_only_refine = false,
+                           limiter! = PositivityPreservingLimiterZhangShu(thresholds = (5.0e-6,
+                                                                                        5.0e-6),
+                                                                          variables = (Trixi.density,
+                                                                                       pressure)))
 
 stepsize_callback = StepsizeCallback(cfl = 0.5)
 
@@ -113,6 +117,7 @@ callbacks = CallbackSet(summary_callback,
 ###############################################################################
 # run the simulation
 
-sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
+sol = solve(ode,
+            CarpenterKennedy2N54(williamson_condition = false, thread = Trixi.Threaded());
             dt = 1, # solve needs some value here but it will be overwritten by the stepsize_callback
             ode_default_options()..., callback = callbacks);

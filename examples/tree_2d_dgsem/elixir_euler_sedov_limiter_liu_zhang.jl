@@ -1,5 +1,4 @@
 using OrdinaryDiffEqLowStorageRK
-using OrdinaryDiffEqSSPRK
 using Trixi
 
 ###############################################################################
@@ -22,12 +21,12 @@ function initial_condition_sedov_blast_wave(x, t, equations::CompressibleEulerEq
     r = sqrt(x_norm^2 + y_norm^2)
 
     # Setup based on example 35.1.4 in https://flash.rochester.edu/site/flashcode/user_support/flash4_ug_4p8.pdf
-    r0 = 0.5
+    r0 = 0.5f0
     E = 1
     p0_inner = 3 * (equations.gamma - 1) * E / (3 * convert(RealT, pi) * r0^2)
 
     # slightly smaller initial pressure to trigger the Liu-Zhang limiter
-    p0_outer = convert(RealT, 1.0e-6) 
+    p0_outer = convert(RealT, 1.0e-6)
 
     # Calculate primitive variables
     rho = 1
@@ -57,7 +56,7 @@ coordinates_min = (-2.0, -2.0)
 coordinates_max = (2.0, 2.0)
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = 6,
-                n_cells_max = 100_000, periodicity = true)
+                periodicity = true)
 
 semi = SemidiscretizationHyperbolic(mesh, equations, initial_condition, dg;
                                     boundary_conditions = boundary_condition_periodic)
@@ -75,7 +74,7 @@ analysis_callback = AnalysisCallback(semi, interval = analysis_interval)
 
 alive_callback = AliveCallback(analysis_interval = analysis_interval)
 
-stepsize_callback = StepsizeCallback(cfl = 1.8)
+stepsize_callback = StepsizeCallback(cfl = 1.3)
 
 ###############################################################################
 # run the simulation
@@ -91,7 +90,7 @@ global_limiter! = PositivityPreservingLimiterLiuZhang(local_limiter!, semi;
 
 ode_solver = CarpenterKennedy2N54(; stage_limiter! = global_limiter!,
                                   step_limiter! = global_limiter!,
-                                  williamson_condition = false)
+                                  williamson_condition = false, thread = Trixi.Threaded())
 
 sol = solve(ode, ode_solver;
             dt = 1, # solve needs some value here but it will be overwritten by the stepsize_callback

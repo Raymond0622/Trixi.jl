@@ -1,78 +1,63 @@
-# Return (best_dist_squared, best_u, has_candidate) updated when u_candidate is closer to u
-# than the current best; otherwise return the inputs unchanged.
-@inline function update_best_candidate!(best_dist_squared, best_u, has_candidate,
-                                        u_candidate, u,
-                                        equations::CompressibleEulerEquations2D)
-    dist_squared = sum(abs2, u_candidate - u)
-    if !has_candidate || dist_squared < best_dist_squared
-        return dist_squared, u_candidate, true
-    end
-    return best_dist_squared, best_u, has_candidate
-end
+# See the comment at the top of admissible_projection_euler_1d.jl for a
+# high-level description of the algorithm.
+
+# By default, Julia/LLVM does not use fused multiply-add operations (FMAs).
+# Since these FMAs can increase the performance of many numerical algorithms,
+# we need to opt-in explicitly.
+# See https://ranocha.de/blog/Optimizing_EC_Trixi for further details.
+@muladd begin
+#! format: noindent
 
 # Used in the mu > 0, lambda > 0 branch of Appendix B.2 of Liu, Milesis, Shu, Zhang (2026).
 @inline function cubic_momentum_root_satisfies_kkt(rho_v1, rho_v1_orig, rho_orig, a,
-                                                   rho_floor, rho_e_floor)
+                                                   rho_floor)
     momentum_sign_complementarity = (rho_v1 > zero(rho_v1) && rho_v1_orig > rho_v1) ||
                                     (rho_v1 < zero(rho_v1) && rho_v1_orig < rho_v1)
+
     satisfies_energy_internal_constraint_at_rho_floor = 2 * rho_floor * rho_orig +
                                                         a * rho_v1 *
                                                         (rho_v1_orig - rho_v1) <
-                                                        2 * rho_floor * rho_e_floor
+                                                        2 * rho_floor * rho_floor
     return momentum_sign_complementarity &&
            satisfies_energy_internal_constraint_at_rho_floor
 end
 
 function project_euler_cubic_branch!(best_dist_squared, best_u, has_candidate, u,
-                                     rho_floor, rho_e_floor, arithmetic_tol,
+                                     rho_floor, rho_e_floor,
                                      use_v1_as_primary,
                                      equations::CompressibleEulerEquations2D)
     rho, rho_v1, rho_v2, rho_e_total = u
-    if use_v1_as_primary
-        a = 1 + (rho_v2 / rho_v1)^2
-        p = rho_floor * (4 * rho_e_floor - 2 * rho_e_total) / a
-        q = -2 * rho_floor * rho_e_floor * rho_v1 / a
-        n_roots, roots = calc_depressed_cubic_roots(p, q)
-        for i in 1:n_roots
-            rho_v1_candidate = roots[i]
-            if cubic_momentum_root_satisfies_kkt(rho_v1_candidate, rho_v1, rho, a,
-                                                 rho_floor, rho_e_floor)
-                rho_e_total_candidate = rho_e_floor +
-                                        a * rho_v1_candidate * rho_v1_candidate /
-                                        (2 * rho_floor)
-                rho_v2_candidate = (rho_v2 / rho_v1) * rho_v1_candidate
-                u_candidate = SVector(rho_floor, rho_v1_candidate, rho_v2_candidate,
-                                      rho_e_total_candidate)
-                best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
-                                                                                  best_u,
-                                                                                  has_candidate,
-                                                                                  u_candidate,
-                                                                                  u,
-                                                                                  equations)
+    rho_v_primary, rho_v_secondary = use_v1_as_primary ? (rho_v1, rho_v2) :
+                                     (rho_v2, rho_v1)
+    a = 1 + (rho_v_secondary / rho_v_primary)^2
+    # eps = rho_floor and beta = 2*(rho_e_floor - rho_floor).
+    p = 2 * rho_floor * (rho_floor + rho_e_floor - rho_e_total) / a
+    q = -2 * rho_floor * rho_floor * rho_v_primary / a
+    n_roots, roots = calc_depressed_cubic_roots(p, q)
+    for i in 1:n_roots
+        rho_v_primary_candidate = roots[i]
+        if cubic_momentum_root_satisfies_kkt(rho_v_primary_candidate, rho_v_primary,
+                                             rho, a,
+                                             rho_floor)
+            rho_e_total_candidate = rho_e_floor +
+                                    a * rho_v_primary_candidate *
+                                    rho_v_primary_candidate /
+                                    (2 * rho_floor)
+            rho_v_secondary_candidate = (rho_v_secondary / rho_v_primary) *
+                                        rho_v_primary_candidate
+            u_candidate = if use_v1_as_primary
+                SVector(rho_floor, rho_v_primary_candidate,
+                        rho_v_secondary_candidate, rho_e_total_candidate)
+            else
+                SVector(rho_floor, rho_v_secondary_candidate,
+                        rho_v_primary_candidate, rho_e_total_candidate)
             end
-        end
-    else
-        a = 1 + (rho_v1 / rho_v2)^2
-        p = rho_floor * (4 * rho_e_floor - 2 * rho_e_total) / a
-        q = -2 * rho_floor * rho_e_floor * rho_v2 / a
-        n_roots, roots = calc_depressed_cubic_roots(p, q)
-        for i in 1:n_roots
-            rho_v2_candidate = roots[i]
-            if cubic_momentum_root_satisfies_kkt(rho_v2_candidate, rho_v2, rho, a,
-                                                 rho_floor, rho_e_floor)
-                rho_e_total_candidate = rho_e_floor +
-                                        a * rho_v2_candidate * rho_v2_candidate /
-                                        (2 * rho_floor)
-                rho_v1_candidate = (rho_v1 / rho_v2) * rho_v2_candidate
-                u_candidate = SVector(rho_floor, rho_v1_candidate, rho_v2_candidate,
-                                      rho_e_total_candidate)
-                best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
-                                                                                  best_u,
-                                                                                  has_candidate,
-                                                                                  u_candidate,
-                                                                                  u,
-                                                                                  equations)
-            end
+            best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
+                                                                              best_u,
+                                                                              has_candidate,
+                                                                              u_candidate,
+                                                                              u,
+                                                                              equations)
         end
     end
     return best_dist_squared, best_u, has_candidate
@@ -87,106 +72,70 @@ function project_euler_lambda_zero_branch!(best_dist_squared, best_u, has_candid
     # and similar in magnitude; error in rho_candidate can then flip the
     # (1 - arithmetic_tol) comparison.
     rho, rho_v1, rho_v2, rho_e_total = u
-    if use_v1_as_primary
-        a = 1 + (rho_v2 / rho_v1)^2
-        discriminant_rho = rho * rho -
-                           (2 * rho * rho_v1 * rho_v1 * (rho_e_total - rho_e_floor) -
-                            a * rho_v1^4) /
-                           (2 * rho_v1 * rho_v1 + (rho_e_floor + rho - rho_e_total)^2 / a)
-        has_real_rho_candidates = discriminant_rho >= zero(discriminant_rho)
-        if has_real_rho_candidates
-            sqrt_discriminant_rho = sqrt(discriminant_rho)
-            for rho_candidate in (0.5 * (rho - sqrt_discriminant_rho),
-                                  0.5 * (rho + sqrt_discriminant_rho))
-                discriminant_rho_v1 = -8 * a * rho_candidate * rho_candidate +
-                                      8 * a * rho * rho_candidate + (a * rho_v1)^2
-                # Roundoff can make discriminant_rho_v1 slightly negative at the real-root
-                # boundary; treat as zero so the >= 0 check passes and sqrt is valid.
-                if discriminant_rho_v1 < zero(discriminant_rho_v1) &&
-                   discriminant_rho_v1 > -arithmetic_tol
-                    discriminant_rho_v1 = zero(discriminant_rho_v1)
-                end
-                candidate_density_satisfies_floor = rho_candidate >=
-                                                    rho_floor - arithmetic_tol
-                has_real_momentum_candidates = discriminant_rho_v1 >=
-                                               zero(discriminant_rho_v1)
-                if candidate_density_satisfies_floor && has_real_momentum_candidates
-                    sqrt_discriminant_rho_v1 = sqrt(discriminant_rho_v1) / a
-                    for rho_v1_candidate in (0.5 * (rho_v1 - sqrt_discriminant_rho_v1),
-                                             0.5 * (rho_v1 + sqrt_discriminant_rho_v1))
-                        candidate_energy_internal_times_rho = rho_e_floor * rho_candidate +
-                                                              0.5f0 * a * rho_v1_candidate *
-                                                              rho_v1_candidate
-                        original_energy_internal_times_rho = rho_e_total * rho_candidate *
-                                                             (1 - arithmetic_tol)
-                        lambda_zero_energy_internal_sign_condition = candidate_energy_internal_times_rho >
-                                                                     original_energy_internal_times_rho
-                        if lambda_zero_energy_internal_sign_condition
-                            rho_e_total_candidate = rho_e_floor +
-                                                    0.5f0 * a * rho_v1_candidate *
-                                                    rho_v1_candidate / rho_candidate
-                            rho_v2_candidate = (rho_v2 / rho_v1) * rho_v1_candidate
-                            u_candidate = SVector(rho_candidate, rho_v1_candidate,
-                                                  rho_v2_candidate, rho_e_total_candidate)
-                            best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
-                                                                                              best_u,
-                                                                                              has_candidate,
-                                                                                              u_candidate,
-                                                                                              u,
-                                                                                              equations)
-                        end
-                    end
-                end
+    rho_v_primary, rho_v_secondary = use_v1_as_primary ? (rho_v1, rho_v2) :
+                                     (rho_v2, rho_v1)
+    a = 1 + (rho_v_secondary / rho_v_primary)^2
+    discriminant_rho = rho * rho -
+                       (2 * rho * rho_v_primary * rho_v_primary *
+                        (rho_e_total - rho_e_floor) -
+                        a * rho_v_primary^4) /
+                       (2 * rho_v_primary * rho_v_primary +
+                        (rho_e_floor + rho - rho_e_total)^2 / a)
+    if discriminant_rho >= zero(discriminant_rho)
+        sqrt_discriminant_rho = sqrt(discriminant_rho)
+        for rho_candidate in (0.5f0 * a_minus_sqrt_b_rationalized(rho,
+                                                          discriminant_rho,
+                                                          sqrt_discriminant_rho),
+                              0.5f0 * (rho + sqrt_discriminant_rho))
+            # For rho_candidate = ½(ρ ± √Δ_ρ), the momentum discriminant reduces to
+            # -8aρ_c² + 8aρρ_c + (aρv)² = 2a(ρ² - Δ_ρ) + (aρv)² (which is independent of
+            # rho_candidate).
+            discriminant_rho_v_primary = 2 * a * (rho^2 - discriminant_rho) +
+                                         (a * rho_v_primary)^2
+            # Roundoff can make discriminant_rho_v_primary slightly negative at the real-root
+            # boundary; treat as zero so the >= 0 check passes.
+            if discriminant_rho_v_primary < zero(discriminant_rho_v_primary) &&
+               discriminant_rho_v_primary > -arithmetic_tol
+                discriminant_rho_v_primary = zero(discriminant_rho_v_primary)
             end
-        end
-    else
-        a = 1 + (rho_v1 / rho_v2)^2
-        discriminant_rho = rho * rho -
-                           (2 * rho * rho_v2 * rho_v2 * (rho_e_total - rho_e_floor) -
-                            a * rho_v2^4) /
-                           (2 * rho_v2 * rho_v2 + (rho_e_floor + rho - rho_e_total)^2 / a)
-        has_real_rho_candidates = discriminant_rho >= zero(discriminant_rho)
-        if has_real_rho_candidates
-            sqrt_discriminant_rho = sqrt(discriminant_rho)
-            for rho_candidate in (0.5 * (rho - sqrt_discriminant_rho),
-                                  0.5 * (rho + sqrt_discriminant_rho))
-                discriminant_rho_v2 = -8 * a * rho_candidate * rho_candidate +
-                                      8 * a * rho * rho_candidate + (a * rho_v2)^2
-                # Roundoff can make discriminant_rho_v2 slightly negative at the real-root
-                # boundary; treat as zero so the >= 0 check passes and sqrt is valid.
-                if discriminant_rho_v2 < zero(discriminant_rho_v2) &&
-                   discriminant_rho_v2 > -arithmetic_tol
-                    discriminant_rho_v2 = zero(discriminant_rho_v2)
-                end
-                candidate_density_satisfies_floor = rho_candidate >=
-                                                    rho_floor - arithmetic_tol
-                has_real_momentum_candidates = discriminant_rho_v2 >=
-                                               zero(discriminant_rho_v2)
-                if candidate_density_satisfies_floor && has_real_momentum_candidates
-                    sqrt_discriminant_rho_v2 = sqrt(discriminant_rho_v2) / a
-                    for rho_v2_candidate in (0.5 * (rho_v2 - sqrt_discriminant_rho_v2),
-                                             0.5 * (rho_v2 + sqrt_discriminant_rho_v2))
-                        candidate_energy_internal_times_rho = rho_e_floor * rho_candidate +
-                                                              0.5f0 * a * rho_v2_candidate *
-                                                              rho_v2_candidate
-                        original_energy_internal_times_rho = rho_e_total * rho_candidate *
-                                                             (1 - arithmetic_tol)
-                        lambda_zero_energy_internal_sign_condition = candidate_energy_internal_times_rho >
-                                                                     original_energy_internal_times_rho
-                        if lambda_zero_energy_internal_sign_condition
-                            rho_e_total_candidate = rho_e_floor +
-                                                    0.5f0 * a * rho_v2_candidate *
-                                                    rho_v2_candidate / rho_candidate
-                            rho_v1_candidate = (rho_v1 / rho_v2) * rho_v2_candidate
-                            u_candidate = SVector(rho_candidate, rho_v1_candidate,
-                                                  rho_v2_candidate, rho_e_total_candidate)
-                            best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
-                                                                                              best_u,
-                                                                                              has_candidate,
-                                                                                              u_candidate,
-                                                                                              u,
-                                                                                              equations)
+            if rho_candidate >= rho_floor - arithmetic_tol &&
+               discriminant_rho_v_primary >= zero(discriminant_rho_v_primary)
+                sqrt_discriminant_rho_v_primary = sqrt(discriminant_rho_v_primary) / a
+                for rho_v_primary_candidate in (0.5f0 *
+                                                (rho_v_primary -
+                                                 sqrt_discriminant_rho_v_primary),
+                                                0.5f0 *
+                                                (rho_v_primary +
+                                                 sqrt_discriminant_rho_v_primary))
+                    # μ > 0 sign check (λ = 0 branch); see admissible_projection_euler_1d.jl.
+                    candidate_energy_internal_times_rho = rho_e_floor * rho_candidate +
+                                                          0.5f0 * a *
+                                                          rho_v_primary_candidate *
+                                                          rho_v_primary_candidate
+                    original_energy_internal_times_rho = rho_e_total * rho_candidate *
+                                                         (1 - arithmetic_tol)
+                    if candidate_energy_internal_times_rho >
+                       original_energy_internal_times_rho
+                        rho_e_total_candidate = rho_e_floor +
+                                                0.5f0 * a * rho_v_primary_candidate *
+                                                rho_v_primary_candidate / rho_candidate
+                        rho_v_secondary_candidate = (rho_v_secondary / rho_v_primary) *
+                                                    rho_v_primary_candidate
+                        u_candidate = if use_v1_as_primary
+                            SVector(rho_candidate, rho_v_primary_candidate,
+                                    rho_v_secondary_candidate,
+                                    rho_e_total_candidate)
+                        else
+                            SVector(rho_candidate, rho_v_secondary_candidate,
+                                    rho_v_primary_candidate,
+                                    rho_e_total_candidate)
                         end
+                        best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
+                                                                                          best_u,
+                                                                                          has_candidate,
+                                                                                          u_candidate,
+                                                                                          u,
+                                                                                          equations)
                     end
                 end
             end
@@ -196,7 +145,7 @@ function project_euler_lambda_zero_branch!(best_dist_squared, best_u, has_candid
 end
 
 """
-    project_to_admissible_set(cell_average, lower_bound, variables,
+    project_to_admissible_set(cell_average, lower_bounds, variables,
                               equations::CompressibleEulerEquations2D)
 
 Implements Appendix B.2 of
@@ -216,12 +165,11 @@ function project_to_admissible_set(cell_average, lower_bounds, variables,
     rho_floor, rho_e_floor = lower_bounds
     u = cell_average
     rho, rho_v1, rho_v2, rho_e_total = u
-    RealT = typeof(rho)
-    thresholds = (rho_floor, rho_e_floor)
     arithmetic_tol = euler_arithmetic_tol(rho_floor, rho_e_floor)
-    @assert arithmetic_tol<minimum(thresholds) "arithmetic_tol must be smaller than the tolerance of the numerical admissible set"
+    RealT = typeof(arithmetic_tol)
+    @assert arithmetic_tol<minimum(lower_bounds) "arithmetic_tol must be smaller than the tolerance of the numerical admissible set"
 
-    if state_is_admissible(u, thresholds, equations)
+    if state_is_admissible(u, lower_bounds, variables, equations)
         return u
     end
 
@@ -230,18 +178,12 @@ function project_to_admissible_set(cell_average, lower_bounds, variables,
     has_candidate = false
 
     density_below_floor = rho < rho_floor
-    density_at_or_above_floor = rho >= rho_floor
     momentum_is_near_zero = abs(rho_v1) < arithmetic_tol && abs(rho_v2) < arithmetic_tol
 
     # Case: mu = 0 and lambda > 0
-    energy_internal_threshold_at_rho_floor = 2 * rho_floor * rho_e_floor + rho_v1 * rho_v1 +
-                                             rho_v2 * rho_v2
-    energy_internal_budget_at_rho_floor = 2 * rho_floor * rho_e_total
-    energy_internal_admissible_after_density_lift = energy_internal_threshold_at_rho_floor <=
-                                                    energy_internal_budget_at_rho_floor
-    case_mu_is_zero_and_lambda_is_positive = density_below_floor &&
-                                             energy_internal_admissible_after_density_lift
-    if case_mu_is_zero_and_lambda_is_positive
+    if density_below_floor &&
+       (2 * rho_floor * rho_e_floor + rho_v1 * rho_v1 + rho_v2 * rho_v2) <=
+       2 * rho_floor * rho_e_total
         u_candidate = SVector(rho_floor, rho_v1, rho_v2, rho_e_total)
         best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
                                                                           best_u,
@@ -253,10 +195,7 @@ function project_to_admissible_set(cell_average, lower_bounds, variables,
 
     # Case: mu > 0 and lambda > 0
     if momentum_is_near_zero
-        total_energy_internal_below_floor_at_zero_velocity = rho_e_total < rho_e_floor
-        case_mu_is_positive_and_lambda_is_positive_zero_momentum = density_below_floor &&
-                                                                   total_energy_internal_below_floor_at_zero_velocity
-        if case_mu_is_positive_and_lambda_is_positive_zero_momentum
+        if density_below_floor && rho_e_total < rho_e_floor
             u_candidate = SVector(rho_floor, zero(RealT), zero(RealT), rho_e_floor)
             best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
                                                                               best_u,
@@ -273,17 +212,13 @@ function project_to_admissible_set(cell_average, lower_bounds, variables,
                                                                                u,
                                                                                rho_floor,
                                                                                rho_e_floor,
-                                                                               arithmetic_tol,
                                                                                use_v1_as_primary,
                                                                                equations)
     end
 
     # Case: mu > 0 and lambda = 0
     if momentum_is_near_zero
-        energy_internal_below_floor = rho_e_total < rho_e_floor
-        case_mu_is_positive_and_lambda_is_zero_zero_momentum = density_at_or_above_floor &&
-                                                               energy_internal_below_floor
-        if case_mu_is_positive_and_lambda_is_zero_zero_momentum
+        if !density_below_floor && rho_e_total < rho_e_floor
             u_candidate = SVector(rho, zero(RealT), zero(RealT), rho_e_floor)
             best_dist_squared, best_u, has_candidate = update_best_candidate!(best_dist_squared,
                                                                               best_u,
@@ -307,8 +242,11 @@ function project_to_admissible_set(cell_average, lower_bounds, variables,
 
     if !has_candidate
         error("Failed to find projection onto Euler admissible set for state ", u,
-              " with rho_floor = ", rho_floor, " and rho_e_floor = ", rho_e_floor, ".")
+              " with rho = ", rho, " and rho_e = ",
+              rho_e_total - 0.5f0 * (rho_v1 * rho_v1 + rho_v2 * rho_v2) / rho,
+              " and rho_floor = ", rho_floor, " and rho_e_floor = ", rho_e_floor, ".")
     end
 
     return best_u
 end
+end # @muladd

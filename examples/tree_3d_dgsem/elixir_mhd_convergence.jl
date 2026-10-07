@@ -78,8 +78,7 @@ coordinates_max = (1.0, 1.0, 1.0)
 
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = 2,
-                periodicity = true,
-                n_cells_max = 100_000)
+                periodicity = true)
 
 semi = SemidiscretizationHyperbolic(mesh, equations,
                                     initial_condition_convergence, solver;
@@ -113,6 +112,8 @@ callbacks = CallbackSet(summary_callback,
 ###############################################################################
 # run the simulation
 
-sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
+sol = solve(ode,
+            CarpenterKennedy2N54(williamson_condition = false,
+                                 thread = Trixi.Threaded());
             dt = 1, # solve needs some value here but it will be overwritten by the stepsize_callback
             ode_default_options()..., callback = callbacks);

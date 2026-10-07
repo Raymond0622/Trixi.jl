@@ -68,8 +68,7 @@ coordinates_min = (0.0, 0.0)
 coordinates_max = (1.0, 1.0)
 
 mesh = TreeMesh(coordinates_min, coordinates_max,
-                initial_refinement_level = 3,
-                n_cells_max = 100_000,
+                initial_refinement_level = 4,
                 periodicity = false)
 
 # HLLC flux is strictly required for this problem
@@ -164,7 +163,7 @@ callbacks = CallbackSet(summary_callback,
 ###############################################################################
 ## Run the simulation
 
-sol = solve(ode, SSPRK54();
+sol = solve(ode, SSPRK54(thread = Trixi.Threaded());
             dt = 1, # solve needs some value here but it will be overwritten by the stepsize_callback
             save_everystep = false, callback = callbacks);
 

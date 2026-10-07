@@ -948,7 +948,8 @@ This function is used to compute the subcell fluxes in dg_2d_subcell_limiters.jl
 end
 
 @inline function (noncons_flux::FluxNonConservativePowellLocalJump)(u_ll, u_rr,
-                                                                    normal_direction_avg::AbstractVector,
+                                                                    normal_direction_ll::AbstractVector,
+                                                                    normal_direction_rr::AbstractVector,
                                                                     equations::IdealGlmMhdEquations2D,
                                                                     nonconservative_type::NonConservativeJump,
                                                                     nonconservative_term::Integer)
@@ -957,10 +958,10 @@ end
 
     if nonconservative_term == 1
         # Powell nonconservative term:   (0, B_1, B_2, B_3, v⋅B, v_1, v_2, v_3, 0)
-        B1_jump = B1_rr - B1_ll
-        B2_jump = B2_rr - B2_ll
-        B_dot_n_jump = B1_jump * normal_direction_avg[1] +
-                       B2_jump * normal_direction_avg[2]
+        B1_jump = B1_rr * normal_direction_rr[1] - B1_ll * normal_direction_ll[1]
+        B2_jump = B2_rr * normal_direction_rr[2] - B2_ll * normal_direction_ll[2]
+
+        B_dot_n_jump = B1_jump + B2_jump
         f = SVector(0,
                     B_dot_n_jump,
                     B_dot_n_jump,
@@ -1382,12 +1383,9 @@ end
     v_normal_ll = (v1_ll * normal_direction[1] + v2_ll * normal_direction[2])
     v_normal_rr = (v1_rr * normal_direction[1] + v2_rr * normal_direction[2])
 
-    c_f_ll = calc_fast_wavespeed(u_ll, normal_direction, equations)
-    c_f_rr = calc_fast_wavespeed(u_rr, normal_direction, equations)
-
     # Estimate the min/max eigenvalues in the normal direction
-    λ_min = min(v_normal_ll - c_f_ll, v_normal_rr - c_f_rr)
-    λ_max = max(v_normal_rr + c_f_rr, v_normal_rr + c_f_rr)
+    λ_min = v_normal_ll - calc_fast_wavespeed(u_ll, normal_direction, equations)
+    λ_max = v_normal_rr + calc_fast_wavespeed(u_rr, normal_direction, equations)
 
     return λ_min, λ_max
 end
@@ -1417,7 +1415,7 @@ end
         c_f_rr = calc_fast_wavespeed(u_rr, orientation, equations)
 
         λ_min = min(v2_ll - c_f_ll, v2_rr - c_f_rr)
-        λ_max = max(v2_ll + c_f_ll, v1_rr + c_f_rr)
+        λ_max = max(v2_ll + c_f_ll, v2_rr + c_f_rr)
     end
 
     return λ_min, λ_max
@@ -1975,7 +1973,7 @@ end
 end
 
 # Calculate the magnetic energy for a conservative state `cons`.
-#  OBS! For non-dinmensional form of the ideal MHD magnetic pressure ≡ magnetic energy
+#  Note: For non-dinmensional form of the ideal MHD magnetic pressure ≡ magnetic energy
 @inline function energy_magnetic(cons, ::IdealGlmMhdEquations2D)
     return 0.5f0 * (cons[6]^2 + cons[7]^2 + cons[8]^2)
 end
