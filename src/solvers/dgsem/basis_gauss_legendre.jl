@@ -130,9 +130,53 @@ function integrate(f, u, basis::GaussLegendreBasis)
     return res
 end
 
-# TODO: Not yet implemented
+# 2:1 mortars on a Gauss volume basis: interpolate the large Gauss face onto
+# each small Gauss grid, L²-project back with Gauss mass (`M_f = W_G`, `M_m = W_G/2`).
 function MortarL2(basis::GaussLegendreBasis)
-    return nothing
+    RealT = real(basis)
+    nnodes_ = nnodes(basis)
+    forward_upper = calc_forward_upper(nnodes_, Val(:gauss_volume), RealT)
+    forward_lower = calc_forward_lower(nnodes_, Val(:gauss_volume), RealT)
+    reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_nodes), RealT)
+    reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_nodes), RealT)
+    return LobattoLegendreMortarL2{RealT, nnodes_, typeof(forward_upper),
+                                   typeof(reverse_upper)}(forward_upper, forward_lower,
+                                                          reverse_upper, reverse_lower)
+end
+
+"""
+    MortarEntropy(basis::GaussLegendreBasis; nodes = :gauss,
+                  reverse_quadrature = :gauss)
+
+Entropy mortar for a Gauss volume basis. Solution nodes are already Gauss, so
+traces are interpolated to the physical face with the Gauss boundary operator
+``L``, then mapped between large and small Gauss faces. Pair with
+[`VolumeIntegralWeakForm`](@ref) and [`SurfaceIntegralWeakForm`](@ref)
+(`M^{-1} L^{T}` SAT). `nodes` and `reverse_quadrature` must be `:gauss`.
+"""
+function MortarEntropy(basis::GaussLegendreBasis; nodes::Symbol = :gauss,
+                       reverse_quadrature::Symbol = :gauss)
+    if nodes !== :gauss
+        throw(ArgumentError("Gauss volume `MortarEntropy` requires `nodes = :gauss`, got $(repr(nodes))"))
+    end
+    if reverse_quadrature !== :gauss
+        throw(ArgumentError("Gauss volume `MortarEntropy` requires `reverse_quadrature = :gauss`, got $(repr(reverse_quadrature))"))
+    end
+
+    RealT = real(basis)
+    nnodes_ = nnodes(basis)
+    node_val = Val(:gauss)
+    identity = calc_identity_matrix(nnodes_, RealT)
+    forward_upper = calc_forward_upper(nnodes_, Val(:gauss_volume), RealT)
+    forward_lower = calc_forward_lower(nnodes_, Val(:gauss_volume), RealT)
+    reverse_upper = calc_reverse_upper(nnodes_, Val(:gauss_nodes), RealT)
+    reverse_lower = calc_reverse_lower(nnodes_, Val(:gauss_nodes), RealT)
+    return LobattoLegendreMortarEntropy{RealT, nnodes_, typeof(node_val),
+                                        typeof(forward_upper),
+                                        typeof(reverse_upper),
+                                        typeof(identity)}(forward_upper, forward_lower,
+                                                          reverse_upper, reverse_lower,
+                                                          identity, identity)
 end
 
 """

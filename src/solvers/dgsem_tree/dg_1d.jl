@@ -424,9 +424,9 @@ function prolong2interfaces!(cache, u_or_flux_parabolic,
     return nothing
 end
 
-function prolong2interfaces!(cache, u_or_flux_parabolic,
-                             mesh::TreeMesh{1}, equations,
-                             dg::DGSEM{<:GaussLegendreBasis})
+function prolong2interfaces_gauss_interpolate!(cache, u_or_flux_parabolic,
+                                               mesh::TreeMesh{1}, equations,
+                                               dg::DGSEM{<:GaussLegendreBasis})
     @unpack interfaces = cache
     @unpack neighbor_ids = interfaces
     @unpack boundary_interpolation = dg.basis
@@ -464,6 +464,60 @@ function prolong2interfaces!(cache, u_or_flux_parabolic,
                 end
                 interfaces_u[1, v, interface] = interface_u_1
                 interfaces_u[2, v, interface] = interface_u_2
+            end
+        end
+    end
+
+    return nothing
+end
+
+function prolong2interfaces!(cache, u, mesh::TreeMesh{1},
+                             equations::AbstractEquationsParabolic,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    prolong2interfaces_gauss_interpolate!(cache, u, mesh, equations, dg)
+    return nothing
+end
+
+@inline function interpolate_gauss_entropy_face_vars(u, equations,
+                                                     dg::DGSEM{<:GaussLegendreBasis},
+                                                     element, col)
+    L = dg.basis.boundary_interpolation
+    v_face = L[1, col] *
+             cons2entropy(get_node_vars(u, equations, dg, 1, element), equations)
+    for ii in 2:nnodes(dg)
+        v_face = v_face +
+                 L[ii, col] *
+                 cons2entropy(get_node_vars(u, equations, dg, ii, element), equations)
+    end
+    return v_face
+end
+
+function prolong2interfaces!(cache, u, mesh::TreeMesh{1}, equations,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    @unpack interfaces = cache
+    @unpack neighbor_ids = interfaces
+    interfaces_u = interfaces.u
+
+    # Explicit bounds check, which allows us to assume inbounds access below
+    @boundscheck begin
+        check_axes(u, mesh, equations, dg, cache)
+        check_axes(interfaces, equations, dg, cache)
+        check_axes(dg.basis.boundary_interpolation, (eachnode(dg), Base.OneTo(2)))
+    end
+
+    @threaded for interface in eachinterface(dg, cache)
+        @inbounds begin
+            left_element = neighbor_ids[1, interface]
+            right_element = neighbor_ids[2, interface]
+            u_ll = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                    left_element, 2),
+                                equations)
+            u_rr = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                    right_element, 1),
+                                equations)
+            for v in eachvariable(equations)
+                interfaces_u[1, v, interface] = u_ll[v]
+                interfaces_u[2, v, interface] = u_rr[v]
             end
         end
     end
@@ -597,9 +651,9 @@ function prolong2boundaries!(backend::Nothing, cache, u_or_flux_parabolic,
     return nothing
 end
 
-function prolong2boundaries!(backend::Nothing, cache, u_or_flux_parabolic,
-                             mesh::TreeMesh{1}, equations,
-                             dg::DGSEM{<:GaussLegendreBasis})
+function prolong2boundaries_gauss_interpolate!(cache, u_or_flux_parabolic,
+                                               mesh::TreeMesh{1}, equations,
+                                               dg::DGSEM{<:GaussLegendreBasis})
     @unpack boundaries = cache
     @unpack neighbor_sides = boundaries
     @unpack boundary_interpolation = dg.basis
@@ -641,6 +695,44 @@ function prolong2boundaries!(backend::Nothing, cache, u_or_flux_parabolic,
                     end
                     boundaries.u[2, v, boundary] = boundary_u_2
                 end
+            end
+        end
+    end
+
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u,
+                             mesh::TreeMesh{1},
+                             equations::AbstractEquationsParabolic,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    prolong2boundaries_gauss_interpolate!(cache, u, mesh, equations, dg)
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u,
+                             mesh::TreeMesh{1}, equations,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    @unpack boundaries = cache
+    @unpack neighbor_sides = boundaries
+
+    # Explicit bounds check, which allows us to assume inbounds access below
+    @boundscheck begin
+        check_axes(u, mesh, equations, dg, cache)
+        check_axes(boundaries, equations, dg, cache)
+        check_axes(dg.basis.boundary_interpolation, (eachnode(dg), Base.OneTo(2)))
+    end
+
+    @threaded for boundary in eachboundary(dg, cache)
+        @inbounds begin
+            element = boundaries.neighbor_ids[boundary]
+            leftright = neighbor_sides[boundary]
+            col = leftright == 1 ? 2 : 1
+            u_face = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                      element, col),
+                                  equations)
+            for v in eachvariable(equations)
+                boundaries.u[leftright, v, boundary] = u_face[v]
             end
         end
     end

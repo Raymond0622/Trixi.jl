@@ -5,10 +5,8 @@ using Trixi
 
 ###############################################################################
 # Isentropic vortex with ECAV on a checkerboard TreeMesh.
-# Volume integral is `VolumeIntegralWeakForm` (same as `elixir_ecav_blast.jl`),
-# not entropy-conservative flux differencing. Physical NS viscosity is off
-# (`mu = 0`). The exact solution is time-dependent so `convergence_test` can
-# use a short tspan.
+# Physical NS viscosity is off (`mu = 0`). The exact solution is time-dependent
+# so `convergence_test` can use a short tspan.
 #
 # Mortar / capturing switches (strings so `trixi_include` / `convergence_test`
 # can override them):
@@ -16,11 +14,12 @@ using Trixi
 #   mortar_nodes     = "gauss_lobatto" | "gauss"   (entropy only)
 #   reverse_quad     = "gauss" | "gauss_lobatto"   (LGL entropy mortars only)
 #   shock_capturing  = "ecav" | "none"
-# Default below: MortarEntropy Gauss traces/Riemann + LGL SAT (`f*/ω`).
-# Reverse: `P = M_f^{-1} I^T M_m` with lumped `M_f = W_LGL`, `M_m = W_G / 2`,
-# `I` = large LGL → small Gauss half. Small-face `f*` interpolated Gauss→LGL.
-# `reverse_quad` is not named `reverse_quadrature` so `trixi_include` cannot
-# rewrite the `MortarEntropy(...; reverse_quadrature = ...)` keyword.
+# `mortar_nodes = "gauss"`: GaussLegendre volume nodes, MortarEntropy Gauss
+# traces/Riemann, Gauss L2 reverse (`P = W_G^{-1} I^T (W_G/2)`), and the native
+# Gauss SAT (`SurfaceIntegralWeakForm` with `M^{-1} L^T`).
+# `mortar_nodes = "gauss_lobatto"`: LGL volume + LGL SAT; `reverse_quad` selects
+# the large-face reverse mass. `reverse_quad` is not named `reverse_quadrature`
+# so `trixi_include` cannot rewrite the `MortarEntropy` keyword.
 
 gamma = 1.4
 equations = CompressibleEulerEquations2D(gamma)
@@ -73,40 +72,43 @@ end
 initial_condition = initial_condition_isentropic_vortex
 
 polydeg = 3
-basis = LobattoLegendreBasis(polydeg)
-
 volume_flux = flux_ranocha
-surface_flux = flux_ranocha
+surface_flux = flux_lax_friedrichs
 #volume_integral = VolumeIntegralFluxDifferencing(volume_flux)
-volume_integral = VolumeIntegralWeakForm()
 
 mortar_type = "entropy"
-mortar_nodes = "gauss_lobatto"
-reverse_quad = "gauss_lobatto"
+mortar_nodes = "gauss"
+reverse_quad = "gauss"
 if mortar_type == "l2"
+    basis = LobattoLegendreBasis(polydeg)
     mortar = MortarL2(basis)
     surface_integral = SurfaceIntegralWeakForm(surface_flux)
+    volume_integral = VolumeIntegralWeakForm()
 elseif mortar_nodes == "gauss"
+    basis = GaussLegendreBasis(polydeg)
     mortar = MortarEntropy(basis; nodes = :gauss, reverse_quadrature = :gauss)
     surface_integral = SurfaceIntegralWeakForm(surface_flux)
+    volume_integral = VolumeIntegralWeakForm()
 else
+    basis = LobattoLegendreBasis(polydeg)
     mortar = MortarEntropy(basis; nodes = :gauss_lobatto,
                            reverse_quadrature = Symbol(reverse_quad))
     surface_integral = SurfaceIntegralWeakForm(surface_flux)
+    volume_integral = VolumeIntegralWeakForm()
 end
 solver = DGSEM(basis, surface_integral, volume_integral, mortar)
 
 # Mesh switch (so `trixi_include` / `convergence_test` can override it):
 #   checkerboard = true  → 2:1 hanging faces (nmortars > 0)
 #   checkerboard = false → uniform conforming TreeMesh
-checkerboard = true
+checkerboard = false;
 
 coordinates_min = (-10.0, -10.0)
 coordinates_max = (10.0, 10.0)
-initial_refinement_level = 2
+initial_refinement_level = 5
 mesh = TreeMesh(coordinates_min, coordinates_max,
                 initial_refinement_level = initial_refinement_level,
-                n_cells_max = 400_000, periodicity = true)
+                periodicity = true)
 
 if checkerboard
     # Read the level from the tree so `convergence_test` overrides of
@@ -148,7 +150,7 @@ end
 ###############################################################################
 # ODE solvers, callbacks etc.
 
-tspan = (0.0, 1.2)
+tspan = (0.0, 0.4)
 ode = semidiscretize(semi, tspan)
 
 summary_callback = SummaryCallback()
@@ -165,34 +167,23 @@ callbacks = CallbackSet(summary_callback, analysis_callback, alive_callback,
 
 # `dt` is overwritten by `StepsizeCallback`. Do not omit that callback with
 # CarpenterKennedy2N54 — a raw `dt = 1` is far too large for this mesh.
+saveat_times = tspan[2]
 sol = solve(ode, CarpenterKennedy2N54(williamson_condition = false);
-            dt = 1.0, saveat = 0.05,
+            dt = 1.0, saveat = saveat_times,
             ode_default_options()..., callback = callbacks)
 
-# using Plots
-# pd = PlotData2D(sol)
-# plot(getmesh(pd), title = "mesh")
-# savefig("mesh.png")
-# plot(pd["rho"], title = "rho at t = $(round(sol.t[end]; digits = 3))")
-# plot!(getmesh(pd))
-# savefig("rho.png")
-
-# Domain-integrated entropy at each saved solution time (same quadrature as AnalysisCallback).
-entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
-open("entropy_integral.csv", "w") do io
-    println(io, "t,entropy")
-    for (t, S) in zip(sol.t, entropy_integral)
-        println(io, t, ",", S)
-    end
-end
-println("entropy integral  S(0) = ", entropy_integral[1],
-        "  S(end) = ", entropy_integral[end],
-        "  ΔS = ", entropy_integral[end] - entropy_integral[1])
-
+make_plots = true
+if make_plots
     using Plots
+    pd = PlotData2D(sol)
+    plot(getmesh(pd), title = "mesh")
+
+    entropy_integral = [Trixi.integrate(entropy, u, semi) for u in sol.u]
+    println("entropy integral  S(0) = ", entropy_integral[1],
+            "  S(end) = ", entropy_integral[end],
+            "  ΔS = ", entropy_integral[end] - entropy_integral[1])
     plot(sol.t, entropy_integral, xlabel = "t", ylabel = "∫ S dV / |Ω|",
          legend = false, title = "entropy integral")
     savefig("entropy_integral.png")
-
-    println("Plots unavailable (", typeof(e), "); wrote entropy_integral.csv")
+end
 

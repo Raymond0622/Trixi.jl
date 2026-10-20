@@ -39,27 +39,33 @@ analytic_rho_xx(x, y) = 6 * x + 2 * y
 
 function make_semi(; checkerboard, mortar_type, initial_refinement_level)
     polydeg = 3
-    basis = LobattoLegendreBasis(polydeg)
     surface_flux = flux_ranocha
     volume_integral = VolumeIntegralWeakForm()
-    if mortar_type == "l2"
-        mortar = MortarL2(basis)
+    if mortar_type == "gauss_volume"
+        basis = GaussLegendreBasis(polydeg)
+        mortar = MortarEntropy(basis; nodes = :gauss, reverse_quadrature = :gauss)
         surface_integral = SurfaceIntegralWeakForm(surface_flux)
-    elseif mortar_type == "l2_gauss"
-        mortar = MortarL2(basis)
-        surface_integral = SurfaceIntegralWeakFormGauss(surface_flux)
-    elseif mortar_type == "entropy_lgl"
-        mortar = MortarEntropy(basis; nodes = :gauss_lobatto,
-                               reverse_quadrature = :gauss_lobatto)
-        surface_integral = SurfaceIntegralWeakForm(surface_flux)
-    elseif mortar_type == "entropy_gauss_sat"
-        mortar = MortarEntropy(basis; nodes = :gauss,
-                               reverse_quadrature = :gauss)
-        surface_integral = SurfaceIntegralWeakFormGauss(surface_flux)
     else
-        mortar = MortarEntropy(basis; nodes = :gauss,
-                               reverse_quadrature = :gauss_lobatto)
-        surface_integral = SurfaceIntegralWeakForm(surface_flux)
+        basis = LobattoLegendreBasis(polydeg)
+        if mortar_type == "l2"
+            mortar = MortarL2(basis)
+            surface_integral = SurfaceIntegralWeakForm(surface_flux)
+        elseif mortar_type == "l2_gauss"
+            mortar = MortarL2(basis)
+            surface_integral = SurfaceIntegralWeakFormGauss(surface_flux)
+        elseif mortar_type == "entropy_lgl"
+            mortar = MortarEntropy(basis; nodes = :gauss_lobatto,
+                                   reverse_quadrature = :gauss_lobatto)
+            surface_integral = SurfaceIntegralWeakForm(surface_flux)
+        elseif mortar_type == "entropy_gauss_sat"
+            mortar = MortarEntropy(basis; nodes = :gauss,
+                                   reverse_quadrature = :gauss)
+            surface_integral = SurfaceIntegralWeakFormGauss(surface_flux)
+        else
+            mortar = MortarEntropy(basis; nodes = :gauss,
+                                   reverse_quadrature = :gauss_lobatto)
+            surface_integral = SurfaceIntegralWeakForm(surface_flux)
+        end
     end
     solver = DGSEM(basis, surface_integral, volume_integral, mortar)
     solver_parabolic = Trixi.ParabolicFormulationBassiRebay1()
@@ -68,7 +74,7 @@ function make_semi(; checkerboard, mortar_type, initial_refinement_level)
     coordinates_max = (1.0, 1.0)
     mesh = TreeMesh(coordinates_min, coordinates_max;
                     initial_refinement_level = initial_refinement_level,
-                    n_cells_max = 400_000, periodicity = false)
+                    periodicity = false)
     if checkerboard
         # Interior checkerboard only: leave the outer ring unrefined so every
         # Dirichlet face is 1:1 (no hanging nodes on the domain boundary).
@@ -165,8 +171,8 @@ function rho_x_fields(semi)
     (; u_transformed, gradients) = semi.cache_parabolic.parabolic_container
     eqs_av_semi = semi.artificial_viscosity.equations_artificial_viscosity
     Trixi.transform_variables!(u_transformed, u, mesh, equations_parabolic, dg, cache)
-    Trixi.calc_gradient!(gradients, u_transformed, 0.0, mesh, equations_parabolic,
-                         semi.boundary_conditions_parabolic, dg,
+    Trixi.calc_gradient!(nothing, gradients, u_transformed, 0.0, mesh,
+                         equations_parabolic, semi.boundary_conditions_parabolic, dg,
                          semi.solver_parabolic, cache)
     flux_parabolic = semi.cache_parabolic.parabolic_container.flux_parabolic
     Trixi.calc_parabolic_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
@@ -215,6 +221,10 @@ end
 function rho_x_errors(semi)
     num, ex = rho_x_fields(semi)
     vol_l2, vol_linf = weighted_errors(num, ex, semi)
+    _, _, dg, _ = Trixi.mesh_equations_solver_cache(semi)
+    if dg isa DGSEM{<:GaussLegendreBasis}
+        return vol_l2, vol_linf, NaN, NaN
+    end
     gauss_l2, gauss_linf = gauss_surface_rho_x_errors(num, semi)
     return vol_l2, vol_linf, gauss_l2, gauss_linf
 end
@@ -227,8 +237,8 @@ function rho_xx_errors(semi)
     (; u_transformed, gradients) = semi.cache_parabolic.parabolic_container
     eqs_av_semi = semi.artificial_viscosity.equations_artificial_viscosity
     Trixi.transform_variables!(u_transformed, u, mesh, equations_parabolic, dg, cache)
-    Trixi.calc_gradient!(gradients, u_transformed, 0.0, mesh, equations_parabolic,
-                         semi.boundary_conditions_parabolic, dg,
+    Trixi.calc_gradient!(nothing, gradients, u_transformed, 0.0, mesh,
+                         equations_parabolic, semi.boundary_conditions_parabolic, dg,
                          semi.solver_parabolic, cache)
     n = Trixi.nnodes(dg)
     ne = Trixi.nelements(dg, cache)
@@ -248,13 +258,14 @@ println("warmup (Julia 1.12: use JULIA_NUM_THREADS=1)...")
 flush(stdout)
 
 mortar_specs = Dict(
+    "gauss_volume" => ("gauss_volume", "Gauss volume + MortarEntropy Gauss SAT"),
     "entropy" => ("entropy", "MortarEntropy Gauss LGL SAT M_f=W_LGL"),
     "entropy_gauss_sat" => ("entropy_gauss_sat", "MortarEntropy Gauss SAT"),
     "l2" => ("l2", "MortarL2 LGL SAT"),
     "l2_gauss" => ("l2_gauss", "MortarL2 Gauss SAT"),
     "entropy_lgl" => ("entropy_lgl", "MortarEntropy LGL"),
 )
-mortar_key = get(ENV, "MORTAR", "entropy")
+mortar_key = get(ENV, "MORTAR", "gauss_volume")
 mortars = (mortar_specs[mortar_key],)
 warmup_type = mortars[1][1]
 
@@ -262,6 +273,7 @@ try
     tiny = make_semi(; checkerboard = true, mortar_type = warmup_type,
                      initial_refinement_level = 3)
     rho_x_errors(tiny)
+    rho_xx_errors(tiny)
     println("  warmup ", warmup_type, " ok")
     flush(stdout)
 catch e
@@ -284,8 +296,10 @@ end
 
 for (mortar_type, title) in mortars
     println("="^80)
-    println("checkerboard  ", title, "  ρ_x  cubic polynomial  (polydeg = 3)")
-    if mortar_type == "l2"
+    println("checkerboard  ", title, "  ρ_x / ρ_xx  cubic polynomial  (polydeg = 3)")
+    if mortar_type == "gauss_volume"
+        println("GaussLegendreBasis volume, MortarEntropy Gauss traces, M^{-1} L^T SAT")
+    elseif mortar_type == "l2"
         println("MortarL2, LGL SAT (f*/ω)")
     elseif mortar_type == "l2_gauss"
         println("MortarL2, Gauss SAT  Q = W_LGL^{-1} I_{L→G}^T W_G I_{L→G}")
@@ -297,9 +311,10 @@ for (mortar_type, title) in mortars
         println("MortarEntropy nodes=:gauss, M_f=W_LGL, LGL SAT (f*/ω)")
     end
     println("="^80)
-    vol_rows = NamedTuple[]
-    prev_vol_l2 = prev_vol_linf = NaN
-    println("ρ_x  volume LGL")
+    x_rows = NamedTuple[]
+    xx_rows = NamedTuple[]
+    prev_x_l2 = prev_x_linf = prev_xx_l2 = prev_xx_linf = NaN
+    println(mortar_type == "gauss_volume" ? "ρ_x  volume Gauss" : "ρ_x  volume LGL")
     @printf("%5s  %10s  %8s  %12s  %8s  %12s  %8s\n",
             "level", "nelements", "nmortars", "L2", "EOC L2", "L∞", "EOC L∞")
     for level in levels
@@ -308,28 +323,44 @@ for (mortar_type, title) in mortars
         mesh, _, dg, cache = Trixi.mesh_equations_solver_cache(semi)
         ne = Trixi.nelements(dg, cache)
         nm = Trixi.nmortars(dg, cache)
-        vol_l2, vol_linf, _, _ = rho_x_errors(semi)
-        eoc_vol_l2 = isnan(prev_vol_l2) ? NaN : eoc(prev_vol_l2, vol_l2)
-        eoc_vol_linf = isnan(prev_vol_linf) ? NaN : eoc(prev_vol_linf, vol_linf)
-        push!(vol_rows, (level = level, nelements = ne, nmortars = nm,
-                         l2 = vol_l2, linf = vol_linf,
-                         eoc_l2 = eoc_vol_l2, eoc_linf = eoc_vol_linf))
-        print_eoc_row(level, ne, nm, vol_l2, eoc_vol_l2, vol_linf, eoc_vol_linf)
+        x_l2, x_linf, _, _ = rho_x_errors(semi)
+        xx_l2, xx_linf = rho_xx_errors(semi)
+        eoc_x_l2 = isnan(prev_x_l2) ? NaN : eoc(prev_x_l2, x_l2)
+        eoc_x_linf = isnan(prev_x_linf) ? NaN : eoc(prev_x_linf, x_linf)
+        eoc_xx_l2 = isnan(prev_xx_l2) ? NaN : eoc(prev_xx_l2, xx_l2)
+        eoc_xx_linf = isnan(prev_xx_linf) ? NaN : eoc(prev_xx_linf, xx_linf)
+        push!(x_rows, (level = level, nelements = ne, nmortars = nm,
+                       l2 = x_l2, linf = x_linf,
+                       eoc_l2 = eoc_x_l2, eoc_linf = eoc_x_linf))
+        push!(xx_rows, (level = level, nelements = ne, nmortars = nm,
+                        l2 = xx_l2, linf = xx_linf,
+                        eoc_l2 = eoc_xx_l2, eoc_linf = eoc_xx_linf))
+        print_eoc_row(level, ne, nm, x_l2, eoc_x_l2, x_linf, eoc_x_linf)
         flush(stdout)
-        prev_vol_l2, prev_vol_linf = vol_l2, vol_linf
+        prev_x_l2, prev_x_linf = x_l2, x_linf
+        prev_xx_l2, prev_xx_linf = xx_l2, xx_linf
     end
-    results[mortar_type] = (volume = vol_rows,)
+    println()
+    println(mortar_type == "gauss_volume" ? "ρ_xx  volume Gauss" : "ρ_xx  volume LGL")
+    @printf("%5s  %10s  %8s  %12s  %8s  %12s  %8s\n",
+            "level", "nelements", "nmortars", "L2", "EOC L2", "L∞", "EOC L∞")
+    for r in xx_rows
+        print_eoc_row(r.level, r.nelements, r.nmortars, r.l2, r.eoc_l2, r.linf, r.eoc_linf)
+    end
+    results[mortar_type] = (rho_x = x_rows, rho_xx = xx_rows)
     println()
 end
 
 println("="^80)
-println("Mean EOC levels 3→7  checkerboard  ρ_x  (polydeg = 3; cubic ρ, expected ≈ 3)")
+println("Mean EOC levels 3→7  checkerboard  cubic ρ  (polydeg = 3; expected ≈ 3)")
 println("="^80)
 for (mortar_type, title) in mortars
-    rows = results[mortar_type][:volume]
-    eocs_l2 = [r.eoc_l2 for r in rows if isfinite(r.eoc_l2)]
-    eocs_linf = [r.eoc_linf for r in rows if isfinite(r.eoc_linf)]
-    @printf("%-28s  L2  %.2f    L∞  %.2f\n", title,
-            sum(eocs_l2) / length(eocs_l2),
-            sum(eocs_linf) / length(eocs_linf))
+    for (label, key) in (("ρ_x ", :rho_x), ("ρ_xx", :rho_xx))
+        rows = results[mortar_type][key]
+        eocs_l2 = [r.eoc_l2 for r in rows if isfinite(r.eoc_l2)]
+        eocs_linf = [r.eoc_linf for r in rows if isfinite(r.eoc_linf)]
+        @printf("%-28s  %s  L2  %.2f    L∞  %.2f\n", title, label,
+                sum(eocs_l2) / length(eocs_l2),
+                sum(eocs_linf) / length(eocs_linf))
+    end
 end

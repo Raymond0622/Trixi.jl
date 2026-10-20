@@ -458,4 +458,5 @@ end
 
 # Convert conservative variables to entropy variables
 @inline cons2entropy(u, equations::AcousticPerturbationEquations2D) = u
+@inline entropy2cons(w, equations::AcousticPerturbationEquations2D) = w
 end # @muladd

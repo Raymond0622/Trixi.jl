@@ -29,6 +29,9 @@
     end
 
     # Quadrature weights at the nodes where `prolong2mortars!` stores traces / Riemann states.
+    @inline function mortar_quadrature_weights(mortar, dg::DGSEM{<:GaussLegendreBasis})
+        return dg.basis.weights
+    end
     @inline function mortar_quadrature_weights(mortar, dg)
         if mortar_nodes(mortar) isa Val{:gauss}
             _, weights = gauss_nodes_weights(nnodes(dg), real(dg))
@@ -66,10 +69,14 @@
                                          weight_ij
         end
 
-        # Conforming (and boundary) faces: LGL quadrature of ψ(u), matching LGL SAT.
+        # Conforming (and boundary) faces. LGL SAT uses LGL face traces and weights.
+        # Gauss mortar SAT interpolates the LGL face to Gauss and uses Gauss weights.
         # Hanging faces are omitted here and added with mortar quadrature in
         # `add_mortar_entropy_potential!`.
         surface_integral_entropy_potential = zero(real(dg))
+        use_gauss_face = mortar_uses_gauss_nodes(dg)
+        face_weights = dg.basis.weights
+        I_lg = use_gauss_face ? dg.mortar.lobatto2gauss : nothing
         for direction in (1, 2, 3, 4)
             is_hanging_face(hanging_faces, element, direction) && continue
             normal = if direction == 1
@@ -81,12 +88,46 @@
             else
                 SVector(0.0f0, 1.0f0)
             end
-            for ii in eachnode(dg)
-                u_node = get_face_node_vars(u, equations, dg, element, direction, ii)
-                surface_integral_entropy_potential = surface_integral_entropy_potential +
-                                                     dg.basis.weights[ii] *
-                                                     entropy_potential(u_node, normal,
-                                                                       equations)
+            if dg isa DGSEM{<:GaussLegendreBasis}
+                # Same entropy-variable interpolant as Gauss `prolong2interfaces!` /
+                # MortarEntropy `prolong2mortars!`. `ψ(Iu)` does not cancel
+                # `v · SAT` because the SAT traces are `entropy2cons(Iv)`.
+                for k in eachnode(dg)
+                    u_face = entropy2cons(interpolate_gauss_entropy_face_vars(u,
+                                                                              equations,
+                                                                              dg,
+                                                                              element,
+                                                                              direction,
+                                                                              k),
+                                          equations)
+                    surface_integral_entropy_potential = surface_integral_entropy_potential +
+                                                         face_weights[k] *
+                                                         entropy_potential(u_face, normal,
+                                                                           equations)
+                end
+            elseif use_gauss_face
+                for k in eachnode(dg)
+                    u_node = get_face_node_vars(u, equations, dg, element, direction, 1)
+                    u_gauss = I_lg[k, 1] * u_node
+                    for l in 2:nnodes(dg)
+                        u_node = get_face_node_vars(u, equations, dg, element, direction,
+                                                    l)
+                        u_gauss = u_gauss + I_lg[k, l] * u_node
+                    end
+                    surface_integral_entropy_potential = surface_integral_entropy_potential +
+                                                         face_weights[k] *
+                                                         entropy_potential(u_gauss,
+                                                                            normal,
+                                                                            equations)
+                end
+            else
+                for ii in eachnode(dg)
+                    u_node = get_face_node_vars(u, equations, dg, element, direction, ii)
+                    surface_integral_entropy_potential = surface_integral_entropy_potential +
+                                                         face_weights[ii] *
+                                                         entropy_potential(u_node, normal,
+                                                                           equations)
+                end
             end
         end
 
@@ -240,8 +281,8 @@
             # flip the sign to account for the fact that viscous terms are negated by convention in Trixi.jl.
             ecav_coefficient = regularized_ratio(min(0, entropy_residual[element]),
                                                  element_viscous_dissipation)
-            ecav_coefficient = entropy_residual[element] /
-                                                  element_viscous_dissipation
+             ecav_coefficient = entropy_residual[element] /
+                                                   element_viscous_dissipation
             #ecav_coefficient = 0.0
             cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
             for j in eachnode(dg), i in eachnode(dg)
@@ -389,16 +430,6 @@
                                   dg.volume_integral, dg, cache)
         end
 
-        # Mortar traces are needed for hanging-face ψ quadrature in the residual.
-        @trixi_timeit_ext backend timer() "prolong2mortars+entropy_residual" begin
-            prolong2mortars_for_entropy_residual!(cache, u, mesh, equations, dg)
-        end
-
-        # calculate entropy residual
-        entropy_residual = cache.artificial_viscosity.coefficients # reuse storage
-        calc_entropy_residuals!(entropy_residual, du, u, mesh, equations, dg, cache)
-        #push!(cache.artificial_viscosity.max_coeff, maximum(-min.(0.0, entropy_residual)))
-
         # Prolong solution to interfaces
         @trixi_timeit_ext backend timer() "prolong2interfaces" begin
             prolong2interfaces!(backend, cache, u, mesh, equations, dg)
@@ -422,7 +453,17 @@
                                 dg.surface_integral, dg)
         end
 
-        # Mortar traces were already filled before the entropy residual.
+        # Mortar traces are needed for hanging-face ψ quadrature in the residual.
+        # The below function calls prolong2mortars
+        @trixi_timeit_ext backend timer() "prolong2mortars+entropy_residual" begin
+            prolong2mortars_for_entropy_residual!(cache, u, mesh, equations, dg)
+        end
+
+        # calculate entropy residual
+        entropy_residual = cache.artificial_viscosity.coefficients # reuse storage
+        calc_entropy_residuals!(entropy_residual, du, u, mesh, equations, dg, cache)
+        #push!(cache.artificial_viscosity.max_coeff, maximum(-min.(0.0, entropy_residual)))
+
 
         # Calculate mortar fluxes
         @trixi_timeit timer() "mortar flux" begin
@@ -448,7 +489,7 @@
 
         # Compute the gradients of the transformed variables
         @trixi_timeit timer() "calculate gradient" begin
-            calc_gradient!(gradients, u_transformed, t, mesh,
+            calc_gradient!(backend, gradients, u_transformed, t, mesh,
                            equations_parabolic, boundary_conditions_parabolic,
                            dg, parabolic_scheme, cache)
         end

@@ -285,8 +285,9 @@ Create a mortar that interpolates traces in entropy variables.
   at Gauss nodes.
   `reverse_quadrature = :gauss` L²-projects in Gauss space with
   `P = M_f^{-1} I^T M_m`, `M_f = W_G`, `M_m = W_G / 2`, and copies small-face
-  Gauss `f*`. Pair with [`SurfaceIntegralWeakFormGauss`](@ref): lift
-  `L = I_{L→G}^T W_G`, then lumped `M^{-1}`.
+  Gauss `f*`. Pair with [`VolumeIntegralWeakFormGauss`](@ref) and
+  [`SurfaceIntegralWeakFormGauss`](@ref): lift `L = I_{L→G}^T W_G`, then lumped
+  `M^{-1}`.
   `reverse_quadrature = :gauss_lobatto` uses `M_f = W_LGL`,
   `M_m = W_G / 2` (`P = W_LGL^{-1} I_{L→G,half}^T (W_G/2)`), mapping Gauss `f*`
   onto the large LGL face, and interpolates small-face fluxes to LGL. Pair with

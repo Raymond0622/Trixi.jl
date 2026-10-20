@@ -1,4 +1,4 @@
-using LinearAlgebra: I
+using LinearAlgebra: I, dot
 using Printf
 using Trixi
 
@@ -47,9 +47,9 @@ analytic_rho_y(x, y) = x^2 + 2 * x * y + 3 * y^2
 analytic_rho_xx(x, y) = 6 * x + 2 * y
 analytic_rho_yy(x, y) = 2 * x + 6 * y
 
-checkerboard = true;
-mortar_type = "l2"
-initial_refinement_level = 7;
+checkerboard = false;
+mortar_type = "entropy"
+initial_refinement_level = 3;
 polydeg = 3
 basis = LobattoLegendreBasis(polydeg)
 surface_flux = flux_ranocha
@@ -57,18 +57,19 @@ volume_integral = VolumeIntegralWeakForm()
 if mortar_type == "l2"
     mortar = MortarL2(basis)
 else
-    mortar = MortarEntropy(basis; nodes = :gauss,
-                            reverse_quadrature = :gauss)
+    mortar = MortarEntropy(basis; nodes = :gauss_lobatto,
+                           reverse_quadrature = :gauss_lobatto)
 end
-surface_integral = SurfaceIntegralWeakFormGauss(surface_flux)
+surface_integral = SurfaceIntegralWeakForm(surface_flux)
 solver = DGSEM(basis, surface_integral, volume_integral, mortar)
-solver_parabolic = Trixi.ParabolicFormulationBassiRebay1()
+solver_parabolic = Trixi.ParabolicFormulationLocalDG();
+#solver_parabolic = Trixi.ParabolicFormulationBassiRebay1()
 
 coordinates_min = (-1.0, -1.0)
 coordinates_max = (1.0, 1.0)
 mesh = TreeMesh(coordinates_min, coordinates_max;
                 initial_refinement_level = initial_refinement_level,
-                n_cells_max = 400_000, periodicity = true)
+                periodicity = true)
 if checkerboard
     level = mesh.tree.levels[first(Trixi.leaf_cells(mesh.tree))]
     dx = (coordinates_max[1] - coordinates_min[1]) / 2^level
@@ -159,7 +160,7 @@ end
 # already the level-7 checkerboard.
 let
     tiny_mesh = TreeMesh(coordinates_min, coordinates_max;
-                         initial_refinement_level = 2, n_cells_max = 1_000,
+                         initial_refinement_level = 2,
                          periodicity = true)
     tiny_solver = DGSEM(basis, surface_integral, volume_integral, MortarL2(basis))
     tiny_semi = SemidiscretizationArtificialViscosity(tiny_mesh,
@@ -180,7 +181,8 @@ let
     (; u_transformed, gradients) = tiny_semi.cache_parabolic.parabolic_container
     Trixi.transform_variables!(u_transformed, u_tiny, tiny_mesh_, equations_parabolic,
                                tiny_dg, tiny_cache)
-    Trixi.calc_gradient!(gradients, u_transformed, 0.0, tiny_mesh_, equations_parabolic,
+    Trixi.calc_gradient!(nothing, gradients, u_transformed, 0.0, tiny_mesh_,
+                         equations_parabolic,
                          tiny_semi.boundary_conditions_parabolic, tiny_dg,
                          tiny_semi.solver_parabolic, tiny_cache)
     d2rho_one_direction!(du_tiny, 1, gradients, u_transformed, u_tiny, tiny_semi, eqs_av)
@@ -198,14 +200,16 @@ println("equations_AV       = ",
 
 u_ode = Trixi.compute_coefficients(0.0, semi)
 u = Trixi.wrap_array(u_ode, semi)
-du_xx = Trixi.wrap_array_native(similar(u_ode), semi)
-du_yy = Trixi.wrap_array_native(similar(u_ode), semi)
+du_xx_ode = similar(u_ode)
+du_yy_ode = similar(u_ode)
+du_xx = Trixi.wrap_array_native(du_xx_ode, semi)
+du_yy = Trixi.wrap_array_native(du_yy_ode, semi)
 
 (; u_transformed, gradients) = semi.cache_parabolic.parabolic_container
 eqs_av_semi = semi.artificial_viscosity.equations_artificial_viscosity
 
 Trixi.transform_variables!(u_transformed, u, mesh, equations_parabolic, dg, cache)
-Trixi.calc_gradient!(gradients, u_transformed, 0.0, mesh, equations_parabolic,
+Trixi.calc_gradient!(nothing, gradients, u_transformed, 0.0, mesh, equations_parabolic,
                      semi.boundary_conditions_parabolic, dg,
                      semi.solver_parabolic, cache)
 
@@ -239,9 +243,133 @@ for (name, num, ex, lab) in (("ρ_x", rho_x_num, rho_x_ex, "analytic ρ_x"),
             maximum(abs, ex), lab)
 end
 
-# using Plots
-# plot(ScalarPlotData2D(rho_x_num, semi; variable_name = "ρ_x  (g_x density)"))
-# plot!(getmesh(PlotData2D(u_ode, semi)))
+# Per-element inner product of unscaled ECAV flux g with entropy gradient ∇v,
+# vs ∫ v · (∇·g) after the viscous SAT (still no ECAV coefficient).
+function element_g_dot_gradv(flux_parabolic, gradients, semi)
+    mesh, equations, dg, cache = Trixi.mesh_equations_solver_cache(semi)
+    gx, gy = flux_parabolic
+    wx, wy = gradients
+    D = zeros(Trixi.nelements(dg, cache))
+    for element in Trixi.eachelement(dg, cache)
+        J = Trixi.volume_jacobian(element, mesh, cache)
+        acc = 0.0
+        for j in Trixi.eachnode(dg), i in Trixi.eachnode(dg)
+            g1 = Trixi.get_node_vars(gx, equations, dg, i, j, element)
+            g2 = Trixi.get_node_vars(gy, equations, dg, i, j, element)
+            d1 = Trixi.get_node_vars(wx, equations, dg, i, j, element)
+            d2 = Trixi.get_node_vars(wy, equations, dg, i, j, element)
+            w = dg.basis.weights[i] * dg.basis.weights[j]
+            acc += (dot(g1, d1) + dot(g2, d2)) * w * J
+        end
+        D[element] = acc
+    end
+    return D
+end
+
+function element_v_dot_du(du, u_transformed, semi)
+    mesh, equations, dg, cache = Trixi.mesh_equations_solver_cache(semi)
+    R = zeros(Trixi.nelements(dg, cache))
+    for element in Trixi.eachelement(dg, cache)
+        J = Trixi.volume_jacobian(element, mesh, cache)
+        acc = 0.0
+        for j in Trixi.eachnode(dg), i in Trixi.eachnode(dg)
+            v_node = Trixi.get_node_vars(u_transformed, equations, dg, i, j, element)
+            du_node = Trixi.get_node_vars(du, equations, dg, i, j, element)
+            w = dg.basis.weights[i] * dg.basis.weights[j]
+            acc += dot(v_node, du_node) * w * J
+        end
+        R[element] = acc
+    end
+    return R
+end
+
+function report_g_gradv(label, semi)
+    mesh, _, dg, cache = Trixi.mesh_equations_solver_cache(semi)
+    println("\n======== ", label, " ========")
+    println("basis = ", typeof(dg.basis).name.name,
+            "  mortar = ", typeof(dg.mortar),
+            "  SAT = ", typeof(dg.surface_integral).name.name)
+    println("parabolic scheme = ", semi.solver_parabolic)
+    println("nelements = ", Trixi.nelements(dg, cache),
+            "  nmortars = ", Trixi.nmortars(dg, cache))
+    u_ode = Trixi.compute_coefficients(0.0, semi)
+    u = Trixi.wrap_array(u_ode, semi)
+    du_ode = similar(u_ode)
+    du = Trixi.wrap_array_native(du_ode, semi)
+    (; u_transformed, gradients, flux_parabolic) = semi.cache_parabolic.parabolic_container
+    eqs_av_semi = semi.artificial_viscosity.equations_artificial_viscosity
+    Trixi.transform_variables!(u_transformed, u, mesh, equations_parabolic, dg, cache)
+    Trixi.calc_gradient!(nothing, gradients, u_transformed, 0.0, mesh,
+                         equations_parabolic, semi.boundary_conditions_parabolic, dg,
+                         semi.solver_parabolic, cache)
+    Trixi.calc_parabolic_fluxes!(flux_parabolic, gradients, u_transformed, mesh,
+                                 eqs_av_semi, dg, cache)
+    # Confirm transformed variables are entropy variables.
+    v_err = 0.0
+    for element in Trixi.eachelement(dg, cache), j in Trixi.eachnode(dg),
+        i in Trixi.eachnode(dg)
+        u_node = Trixi.get_node_vars(u, equations, dg, i, j, element)
+        w_node = Trixi.get_node_vars(u_transformed, equations, dg, i, j, element)
+        v_err = max(v_err, maximum(abs, w_node - cons2entropy(u_node, equations)))
+    end
+    println("max |u_transformed − cons2entropy(u)| = ", v_err)
+    Dvol = element_g_dot_gradv(flux_parabolic, gradients, semi)
+    reset_surface_cache!(cache)
+    Ddiv = GC.@preserve du_ode begin
+        du .= 0
+        Trixi.calc_divergence!(du, flux_parabolic, u, mesh, equations_parabolic,
+                               semi.boundary_conditions_parabolic, dg,
+                               semi.solver_parabolic, cache, 0.0)
+        Trixi.apply_jacobian_parabolic!(du, mesh, equations_parabolic, dg, cache)
+        element_v_dot_du(du, u_transformed, semi)
+    end
+    mismatch = Dvol .+ Ddiv
+    println("min/max (g, ∇v)            = ", minimum(Dvol), " / ", maximum(Dvol))
+    println("max |(v, ∇·g)|             = ", maximum(abs, Ddiv))
+    println("max |(g, ∇v) + (v, ∇·g)|   = ", maximum(abs, mismatch))
+    println("mean |(g, ∇v) + (v, ∇·g)|  = ", sum(abs, mismatch) / length(mismatch))
+    println("sum_e (g, ∇v)              = ", sum(Dvol))
+    println("sum_e (v, ∇·g)             = ", sum(Ddiv))
+    println("sum_e [(g, ∇v) + (v, ∇·g)] = ", sum(mismatch))
+    nshow = min(8, length(Dvol))
+    println("first ", nshow, " elements: (g,∇v), (v,∇·g), leftover")
+    for e in 1:nshow
+        @printf("  e=%-4d  % .6e  % .6e  % .6e\n", e, Dvol[e], Ddiv[e], mismatch[e])
+    end
+    return Dvol, Ddiv, mismatch
+end
+
+report_g_gradv("conforming LGL MortarEntropy (unscaled ECAV g)", semi)
+
+let
+    cb_mesh = TreeMesh(coordinates_min, coordinates_max;
+                       initial_refinement_level = initial_refinement_level,
+                       periodicity = true)
+    level = cb_mesh.tree.levels[first(Trixi.leaf_cells(cb_mesh.tree))]
+    dx = (coordinates_max[1] - coordinates_min[1]) / 2^level
+    cells_to_refine = Int[]
+    for cell_id in Trixi.leaf_cells(cb_mesh.tree)
+        x, y = Trixi.cell_coordinates(cb_mesh.tree, cell_id)
+        ix = round(Int, (x - coordinates_min[1]) / dx - 0.5)
+        iy = round(Int, (y - coordinates_min[2]) / dx - 0.5)
+        if iseven(ix + iy)
+            push!(cells_to_refine, cell_id)
+        end
+    end
+    Trixi.refine!(cb_mesh.tree, cells_to_refine)
+    cb_semi = SemidiscretizationArtificialViscosity(cb_mesh,
+                                                    (equations, equations_parabolic),
+                                                    initial_condition_density_wave_ecav,
+                                                    solver;
+                                                    VDM = VDM, filter = filter,
+                                                    ecav_choice = :ecav,
+                                                    combine_rhs = Trixi.True(),
+                                                    equations_artificial_viscosity = eqs_av,
+                                                    solver_parabolic = solver_parabolic,
+                                                    boundary_conditions = (boundary_condition_periodic,
+                                                                           boundary_condition_periodic))
+    report_g_gradv("checkerboard LGL MortarEntropy (unscaled ECAV g)", cb_semi)
+end
 
 rho_xx_num = Array{Float64}(undef, n, n, ne);
 rho_yy_num = similar(rho_xx_num);
@@ -250,10 +378,12 @@ rho_yy_ex = similar(rho_xx_num);
 fill_exact!(rho_xx_ex, (x, y) -> -analytic_rho_xx(x, y), semi);
 fill_exact!(rho_yy_ex, (x, y) -> -analytic_rho_yy(x, y), semi);
 
-d2rho_one_direction!(du_xx, 1, gradients, u_transformed, u, semi, eqs_av_semi)
-rho_xx_num .= -du_xx[1, :, :, :]
-d2rho_one_direction!(du_yy, 2, gradients, u_transformed, u, semi, eqs_av_semi)
-rho_yy_num .= -du_yy[1, :, :, :]
+GC.@preserve du_xx_ode du_yy_ode begin
+    d2rho_one_direction!(du_xx, 1, gradients, u_transformed, u, semi, eqs_av_semi)
+    rho_xx_num .= -du_xx[1, :, :, :]
+    d2rho_one_direction!(du_yy, 2, gradients, u_transformed, u, semi, eqs_av_semi)
+    rho_yy_num .= -du_yy[1, :, :, :]
+end
  
 names = ("ρ_xx", "ρ_yy")
 nums = (rho_xx_num, rho_yy_num)

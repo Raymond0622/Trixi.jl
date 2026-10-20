@@ -240,6 +240,7 @@ end
 
 # Convert conservative variables to entropy variables
 @inline cons2entropy(u, equation::LinearScalarAdvectionEquation1D) = u
+@inline entropy2cons(w, equation::LinearScalarAdvectionEquation1D) = w
 
 @doc raw"""
     entropy(u, equations::AbstractLinearScalarAdvectionEquation)

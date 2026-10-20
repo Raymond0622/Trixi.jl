@@ -49,6 +49,10 @@ function calc_forward_upper(n_nodes, ::Val{:gauss}, RealT = Float64)
     return mortar_interpolation_lgl_to_half_gauss(n_nodes, +1, RealT)
 end
 
+function calc_forward_upper(n_nodes, ::Val{:gauss_volume}, RealT = Float64)
+    return mortar_interpolation_gauss_to_half_gauss(n_nodes, +1, RealT)
+end
+
 # Calculate forward projection matrix for discrete L2 projection from large to lower
 #
 # Note: This is actually an interpolation.
@@ -77,6 +81,10 @@ function calc_forward_lower(n_nodes, ::Val{:gauss}, RealT = Float64)
     return mortar_interpolation_lgl_to_half_gauss(n_nodes, -1, RealT)
 end
 
+function calc_forward_lower(n_nodes, ::Val{:gauss_volume}, RealT = Float64)
+    return mortar_interpolation_gauss_to_half_gauss(n_nodes, -1, RealT)
+end
+
 # Interpolation from large-face LGL nodes to Gauss nodes on one 2:1 half.
 # `sign_half = +1` → upper (`ξ = (η+1)/2`), `-1` → lower (`ξ = (η-1)/2`).
 function mortar_interpolation_lgl_to_half_gauss(n_nodes, sign_half, RealT = Float64)
@@ -87,6 +95,16 @@ function mortar_interpolation_lgl_to_half_gauss(n_nodes, sign_half, RealT = Floa
         mapped[j] = 0.5f0 * (gauss_nodes[j] + sign_half)
     end
     return polynomial_interpolation_matrix(lgl_nodes, mapped)
+end
+
+# Interpolation from large-face Gauss nodes to Gauss nodes on one 2:1 half.
+function mortar_interpolation_gauss_to_half_gauss(n_nodes, sign_half, RealT = Float64)
+    gauss_nodes, _ = gauss_nodes_weights(n_nodes, RealT)
+    mapped = similar(gauss_nodes)
+    for j in eachindex(gauss_nodes)
+        mapped[j] = 0.5f0 * (gauss_nodes[j] + sign_half)
+    end
+    return polynomial_interpolation_matrix(gauss_nodes, mapped)
 end
 
 # Reverse L² in Gauss space: `P = M_f^{-1} I^T M_m` with `I` large Gauss →
@@ -183,6 +201,25 @@ function calc_reverse_lower(n_nodes, ::Val{:gauss_lobatto}, RealT = Float64)
     end
 
     return operator
+end
+
+# LGL-volume / Gauss-quadrature weak operators.
+# `I_lg[k, i] = ℓ_i^{LGL}(ξ_k^G)`.
+# `Qhat = -W_LGL^{-1} D_{LG}^T W_G` with `D_LG = I_lg D_LGL` (exact for P_N).
+# `R    =  W_LGL^{-1} I_lg^T W_G`.
+function gauss_volume_quadrature_operators(basis)
+    RealT = real(basis)
+    n = nnodes(basis)
+    gauss_nodes, gauss_weights = gauss_nodes_weights(n, RealT)
+    I_lg = polynomial_interpolation_matrix(basis.nodes, gauss_nodes)
+    D_lg = I_lg * basis.derivative_matrix
+    Qhat = zeros(RealT, n, n)
+    R = zeros(RealT, n, n)
+    for p in 1:n, k in 1:n
+        Qhat[p, k] = -D_lg[k, p] * gauss_weights[k] / basis.weights[p]
+        R[p, k] = I_lg[k, p] * gauss_weights[k] / basis.weights[p]
+    end
+    return I_lg, Qhat, R
 end
 
 # Face mass that turns LGL-nodal `f*` into the Gauss-quadrature SAT:

@@ -1045,11 +1045,52 @@ function prolong2mortars!(cache, flux_parabolic::Tuple,
                 u_large = view(flux_parabolic_y, :, :, 1, large_element)
             end
         end
-        interpolate_mortar_traces_to_nodes!(cache, mortar, mortar_l2,
-                                            equations_parabolic, dg, u_large,
-                                            leftright, nodes, lobatto2gauss)
+            interpolate_mortar_traces_to_nodes!(cache, mortar, mortar_l2,
+                                                equations_parabolic, dg, u_large,
+                                                leftright, nodes, lobatto2gauss)
+        end
     end
 
+    return nothing
+end
+
+function prolong2mortars!(cache, flux_parabolic::Tuple,
+                          mesh::TreeMesh{2},
+                          equations_parabolic::AbstractEquationsParabolic,
+                          mortar_l2::Union{LobattoLegendreMortarL2,
+                                           LobattoLegendreMortarEntropy},
+                          dg::DGSEM{<:GaussLegendreBasis})
+    flux_parabolic_x, flux_parabolic_y = flux_parabolic
+
+    @threaded for mortar in eachmortar(dg, cache)
+        large_element = cache.mortars.neighbor_ids[3, mortar]
+        upper_element = cache.mortars.neighbor_ids[2, mortar]
+        lower_element = cache.mortars.neighbor_ids[1, mortar]
+        large_dir, small_dir = mortar_face_directions(cache.mortars.large_sides[mortar],
+                                                      cache.mortars.orientations[mortar])
+        leftright_small = cache.mortars.large_sides[mortar] == 1 ? 2 : 1
+        leftright_large = cache.mortars.large_sides[mortar] == 1 ? 1 : 2
+        flux_field = cache.mortars.orientations[mortar] == 1 ? flux_parabolic_x :
+                     flux_parabolic_y
+        u_buffer = cache.u_threaded[Threads.threadid()]
+
+        for l in eachnode(dg)
+            u_upper = interpolate_gauss_face_vars(flux_field, equations_parabolic, dg,
+                                                  upper_element, small_dir, l)
+            u_lower = interpolate_gauss_face_vars(flux_field, equations_parabolic, dg,
+                                                  lower_element, small_dir, l)
+            for v in eachvariable(equations_parabolic)
+                cache.mortars.u_upper[leftright_small, v, l, mortar] = u_upper[v]
+                cache.mortars.u_lower[leftright_small, v, l, mortar] = u_lower[v]
+            end
+            set_node_vars!(u_buffer,
+                           interpolate_gauss_face_vars(flux_field, equations_parabolic,
+                                                       dg, large_element, large_dir, l),
+                           equations_parabolic, dg, l)
+        end
+        element_solutions_to_mortars!(cache.mortars, mortar_l2, leftright_large, mortar,
+                                      u_buffer)
+    end
     return nothing
 end
 

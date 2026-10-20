@@ -209,7 +209,7 @@
         end
 
         @trixi_timeit timer() "calculate gradient" begin
-            calc_gradient!(gradients, u_transformed, t, mesh,
+            calc_gradient!(backend, gradients, u_transformed, t, mesh,
                            equations_parabolic, boundary_conditions_parabolic,
                            dg, solver_parabolic, cache)
         end
@@ -297,7 +297,7 @@
         end
 
         @trixi_timeit timer() "calculate gradient" begin
-            calc_gradient!(gradients, u_transformed, t, mesh,
+            calc_gradient!(backend, gradients, u_transformed, t, mesh,
                            equations_parabolic, boundary_conditions_parabolic,
                            dg, parabolic_scheme, cache)
         end

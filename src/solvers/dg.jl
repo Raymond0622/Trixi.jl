@@ -107,6 +107,26 @@ struct VolumeIntegralWeakForm <: AbstractVolumeIntegral end
 create_cache(mesh, equations, ::VolumeIntegralWeakForm, dg, uEltype) = NamedTuple()
 
 """
+    VolumeIntegralWeakFormGauss()
+
+Weak-form volume integral on an LGL volume basis that evaluates
+``\\int \\nabla \\varphi \\cdot f(u)\\,dV`` with Gauss quadrature of the LGL
+interpolant. Solution coefficients stay at LGL nodes; fluxes are computed at
+tensor-product Gauss nodes after ``u_G = I_{L \\to G} u_L``, then lifted with
+lumped LGL mass:
+
+```
+du += (Qhat ⊗ R) f1(u_G) + (R ⊗ Qhat) f2(u_G)
+Qhat = -W_LGL^{-1} D_{L→G}^T W_G
+R    =  W_LGL^{-1} I_{L→G}^T W_G
+```
+
+Pair with [`SurfaceIntegralWeakFormGauss`](@ref) and
+[`MortarEntropy`](@ref)`(; nodes = :gauss, reverse_quadrature = :gauss)`.
+"""
+struct VolumeIntegralWeakFormGauss <: AbstractVolumeIntegral end
+
+"""
     VolumeIntegralFluxDifferencing(volume_flux)
     VolumeIntegralFluxDifferencing(; volume_flux = flux_central)
 
@@ -1244,7 +1264,6 @@ end
     return nothing
 end
 
-@inline function add_to_node_vars!(u, u_node, equations, solver::DG, indices...)
 Base.@propagate_inbounds function add_to_node_vars!(u, u_node, equations, solver::DG,
                                                     indices...)
     for v in eachvariable(equations)
