@@ -5,8 +5,9 @@
 @muladd begin
 #! format: noindent
 
-# everything related to a DG semidiscretization in 3D,
-# currently limited to Lobatto-Legendre nodes
+# everything related to a DG semidiscretization in 3D.
+# Lobatto-Legendre is the default. Gauss-Legendre volume nodes use
+# `DGSEM{<:GaussLegendreBasis}` together with `MortarEntropy`.
 
 function create_f_threaded(mesh::AbstractMesh{3}, equations,
                            dg::DG, uEltype)
@@ -75,7 +76,8 @@ end
 # The methods below are specialized on the mortar type
 # and called from the basic `create_cache` method at the top.
 function create_cache(mesh::TreeMesh{3}, equations,
-                      mortar_l2::LobattoLegendreMortarL2, uEltype)
+                      mortar_l2::Union{LobattoLegendreMortarL2,
+                                       LobattoLegendreMortarEntropy}, uEltype)
     A3d = Array{uEltype, 3}
     fstar_primary_upper_left_threaded = A3d[A3d(undef, nvariables(equations),
                                                 nnodes(mortar_l2),
@@ -1031,7 +1033,8 @@ function prolong2mortars!(cache, u,
 end
 
 Base.@propagate_inbounds function element_solutions_to_mortars!(mortars,
-                                                                mortar_l2::LobattoLegendreMortarL2,
+                                                                mortar_l2::Union{LobattoLegendreMortarL2,
+                                                                                 LobattoLegendreMortarEntropy},
                                                                 leftright, mortar,
                                                                 u_large::AbstractArray{<:Any,
                                                                                        3},
@@ -1054,7 +1057,8 @@ end
 function calc_mortar_flux!(surface_flux_values,
                            mesh::TreeMesh{3},
                            have_nonconservative_terms::False, equations,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,
+                                            LobattoLegendreMortarEntropy},
                            surface_integral, dg::DG, cache)
     @unpack surface_flux = surface_integral
     @unpack u_lower_left, u_lower_right, u_upper_left, u_upper_right, orientations = cache.mortars
@@ -1115,7 +1119,8 @@ end
 function calc_mortar_flux!(surface_flux_values,
                            mesh::TreeMesh{3},
                            have_nonconservative_terms::True, equations,
-                           mortar_l2::LobattoLegendreMortarL2,
+                           mortar_l2::Union{LobattoLegendreMortarL2,
+                                            LobattoLegendreMortarEntropy},
                            surface_integral, dg::DG, cache)
     surface_flux, nonconservative_flux = surface_integral.surface_flux
     @unpack u_lower_left, u_lower_right, u_upper_left, u_upper_right, orientations, large_sides = cache.mortars
@@ -1372,7 +1377,8 @@ end
 Base.@propagate_inbounds function mortar_fluxes_to_elements!(surface_flux_values,
                                                              mesh::TreeMesh{3},
                                                              equations,
-                                                             mortar_l2::LobattoLegendreMortarL2,
+                                                             mortar_l2::Union{LobattoLegendreMortarL2,
+                                                                              LobattoLegendreMortarEntropy},
                                                              dg::DGSEM, cache,
                                                              mortar,
                                                              fstar_primary_upper_left,
@@ -1594,4 +1600,382 @@ function calc_sources!(backend::Nothing, du, u, t, source_terms,
 
     return nothing
 end
+
+@inline function lgl_face_node_3d(u, equations, dg, element, direction, l, m)
+    n = nnodes(dg)
+    if direction == 1
+        return get_node_vars(u, equations, dg, 1, l, m, element)
+    elseif direction == 2
+        return get_node_vars(u, equations, dg, n, l, m, element)
+    elseif direction == 3
+        return get_node_vars(u, equations, dg, l, 1, m, element)
+    elseif direction == 4
+        return get_node_vars(u, equations, dg, l, n, m, element)
+    elseif direction == 5
+        return get_node_vars(u, equations, dg, l, m, 1, element)
+    else
+        return get_node_vars(u, equations, dg, l, m, n, element)
+    end
+end
+
+function store_lgl_face!(dest, u, equations, dg, element, direction, entropy::Bool)
+    for m in eachnode(dg), l in eachnode(dg)
+        u_face = lgl_face_node_3d(u, equations, dg, element, direction, l, m)
+        if entropy
+            u_face = cons2entropy(u_face, equations)
+        end
+        for v in eachvariable(equations)
+            dest[v, l, m] = u_face[v]
+        end
+    end
+    return nothing
+end
+
+# LGL nodes lie on the faces. Entropy mortars copy `cons2entropy` on the small
+# faces, project the large face in entropy variables, then map back with
+# `entropy2cons`. Parabolic traces pass `entropy = false`.
+function prolong2mortars_lgl!(cache, u, mesh::TreeMesh{3}, equations,
+                              mortar_l2::LobattoLegendreMortarEntropy,
+                              dg::DGSEM{<:LobattoLegendreBasis}, entropy::Bool)
+    @unpack fstar_tmp1_threaded, fstar_primary_upper_left_threaded = cache
+    mortars = cache.mortars
+
+    @threaded for mortar in eachmortar(dg, cache)
+        fstar_tmp1 = fstar_tmp1_threaded[Threads.threadid()]
+        u_large = fstar_primary_upper_left_threaded[Threads.threadid()]
+        large_dir, small_dir = mortar_face_directions(mortars.large_sides[mortar],
+                                                      mortars.orientations[mortar])
+        leftright_small = mortars.large_sides[mortar] == 1 ? 2 : 1
+        leftright_large = mortars.large_sides[mortar] == 1 ? 1 : 2
+
+        store_lgl_face!(view(mortars.u_lower_left, leftright_small, :, :, :, mortar),
+                        u, equations, dg, mortars.neighbor_ids[1, mortar], small_dir,
+                        entropy)
+        store_lgl_face!(view(mortars.u_lower_right, leftright_small, :, :, :, mortar),
+                        u, equations, dg, mortars.neighbor_ids[2, mortar], small_dir,
+                        entropy)
+        store_lgl_face!(view(mortars.u_upper_left, leftright_small, :, :, :, mortar),
+                        u, equations, dg, mortars.neighbor_ids[3, mortar], small_dir,
+                        entropy)
+        store_lgl_face!(view(mortars.u_upper_right, leftright_small, :, :, :, mortar),
+                        u, equations, dg, mortars.neighbor_ids[4, mortar], small_dir,
+                        entropy)
+        store_lgl_face!(u_large, u, equations, dg, mortars.neighbor_ids[5, mortar],
+                        large_dir, entropy)
+        element_solutions_to_mortars!(mortars, mortar_l2, leftright_large, mortar,
+                                      u_large, fstar_tmp1)
+        if entropy
+            entropy2cons_mortar_storage!(mortars.u_upper_left, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_upper_right, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_lower_left, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_lower_right, equations, dg, mortar)
+        end
+    end
+    return nothing
+end
+
+function prolong2mortars!(cache, u::AbstractArray, mesh::TreeMesh{3},
+                          equations::AbstractEquationsParabolic,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM{<:LobattoLegendreBasis})
+    prolong2mortars_lgl!(cache, u, mesh, equations, mortar_l2, dg, false)
+    return nothing
+end
+
+function prolong2mortars!(cache, u::AbstractArray, mesh::TreeMesh{3}, equations,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM{<:LobattoLegendreBasis})
+    prolong2mortars_lgl!(cache, u, mesh, equations, mortar_l2, dg, true)
+    return nothing
+end
 end # @muladd
+
+# Gauss volume nodes do not lie on ξ = ±1. Interpolate the normal line onto the
+# face; `l, m` are the two tangential Gauss nodes.
+@inline function gauss_volume_node_3d(u, equations, dg, element, direction,
+                                      normal_idx, l, m)
+    if direction <= 2
+        return get_node_vars(u, equations, dg, normal_idx, l, m, element)
+    elseif direction <= 4
+        return get_node_vars(u, equations, dg, l, normal_idx, m, element)
+    else
+        return get_node_vars(u, equations, dg, l, m, normal_idx, element)
+    end
+end
+
+@inline function interpolate_gauss_face_vars(u, equations, dg, element, direction, l, m)
+    L = dg.basis.boundary_interpolation
+    col = gauss_face_interpolation_column(direction)
+    u_face = L[1, col] *
+             gauss_volume_node_3d(u, equations, dg, element, direction, 1, l, m)
+    for ii in 2:nnodes(dg)
+        u_face = u_face +
+                 L[ii, col] *
+                 gauss_volume_node_3d(u, equations, dg, element, direction, ii, l, m)
+    end
+    return u_face
+end
+
+@inline function interpolate_gauss_entropy_face_vars(u, equations, dg, element,
+                                                     direction, l, m)
+    L = dg.basis.boundary_interpolation
+    col = gauss_face_interpolation_column(direction)
+    v_face = L[1, col] *
+             cons2entropy(gauss_volume_node_3d(u, equations, dg, element, direction,
+                                               1, l, m), equations)
+    for ii in 2:nnodes(dg)
+        v_face = v_face +
+                 L[ii, col] *
+                 cons2entropy(gauss_volume_node_3d(u, equations, dg, element, direction,
+                                                   ii, l, m), equations)
+    end
+    return v_face
+end
+
+function store_gauss_face!(dest, u, equations, dg, element, direction, entropy::Bool)
+    for m in eachnode(dg), l in eachnode(dg)
+        u_face = if entropy
+            interpolate_gauss_entropy_face_vars(u, equations, dg, element, direction, l,
+                                                m)
+        else
+            interpolate_gauss_face_vars(u, equations, dg, element, direction, l, m)
+        end
+        for v in eachvariable(equations)
+            dest[v, l, m] = u_face[v]
+        end
+    end
+    return nothing
+end
+
+function prolong2interfaces_gauss_interpolate!(cache, u, mesh::TreeMesh{3}, equations,
+                                               dg::DGSEM{<:GaussLegendreBasis})
+    @unpack interfaces = cache
+    @unpack orientations, neighbor_ids = interfaces
+    interfaces_u = interfaces.u
+
+    @threaded for interface in eachinterface(dg, cache)
+        left_element = neighbor_ids[1, interface]
+        right_element = neighbor_ids[2, interface]
+        left_dir = 2 * orientations[interface]
+        right_dir = left_dir - 1
+        for m in eachnode(dg), l in eachnode(dg)
+            u_ll = interpolate_gauss_face_vars(u, equations, dg, left_element, left_dir,
+                                               l, m)
+            u_rr = interpolate_gauss_face_vars(u, equations, dg, right_element, right_dir,
+                                               l, m)
+            for v in eachvariable(equations)
+                interfaces_u[1, v, l, m, interface] = u_ll[v]
+                interfaces_u[2, v, l, m, interface] = u_rr[v]
+            end
+        end
+    end
+    return nothing
+end
+
+function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{3},
+                             equations::AbstractEquationsParabolic,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    prolong2interfaces_gauss_interpolate!(cache, u, mesh, equations, dg)
+    return nothing
+end
+
+function prolong2interfaces!(backend::Nothing, cache, u, mesh::TreeMesh{3}, equations,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    @unpack interfaces = cache
+    @unpack orientations, neighbor_ids = interfaces
+    interfaces_u = interfaces.u
+
+    @threaded for interface in eachinterface(dg, cache)
+        left_element = neighbor_ids[1, interface]
+        right_element = neighbor_ids[2, interface]
+        left_dir = 2 * orientations[interface]
+        right_dir = left_dir - 1
+        for m in eachnode(dg), l in eachnode(dg)
+            u_ll = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                    left_element, left_dir,
+                                                                    l, m), equations)
+            u_rr = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                    right_element,
+                                                                    right_dir, l, m),
+                                equations)
+            for v in eachvariable(equations)
+                interfaces_u[1, v, l, m, interface] = u_ll[v]
+                interfaces_u[2, v, l, m, interface] = u_rr[v]
+            end
+        end
+    end
+    return nothing
+end
+
+function prolong2boundaries_gauss_interpolate!(cache, u, mesh::TreeMesh{3}, equations,
+                                               dg::DGSEM{<:GaussLegendreBasis})
+    @unpack boundaries = cache
+    @unpack orientations, neighbor_sides = boundaries
+
+    @threaded for boundary in eachboundary(dg, cache)
+        element = boundaries.neighbor_ids[boundary]
+        leftright = neighbor_sides[boundary]
+        direction = 2 * orientations[boundary] - (leftright == 1 ? 0 : 1)
+        for m in eachnode(dg), l in eachnode(dg)
+            u_face = interpolate_gauss_face_vars(u, equations, dg, element, direction, l,
+                                                 m)
+            for v in eachvariable(equations)
+                boundaries.u[leftright, v, l, m, boundary] = u_face[v]
+            end
+        end
+    end
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u, mesh::TreeMesh{3},
+                             equations::AbstractEquationsParabolic,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    prolong2boundaries_gauss_interpolate!(cache, u, mesh, equations, dg)
+    return nothing
+end
+
+function prolong2boundaries!(backend::Nothing, cache, u, mesh::TreeMesh{3}, equations,
+                             dg::DGSEM{<:GaussLegendreBasis})
+    @unpack boundaries = cache
+    @unpack orientations, neighbor_sides = boundaries
+
+    @threaded for boundary in eachboundary(dg, cache)
+        element = boundaries.neighbor_ids[boundary]
+        leftright = neighbor_sides[boundary]
+        direction = 2 * orientations[boundary] - (leftright == 1 ? 0 : 1)
+        for m in eachnode(dg), l in eachnode(dg)
+            u_face = entropy2cons(interpolate_gauss_entropy_face_vars(u, equations, dg,
+                                                                      element, direction,
+                                                                      l, m), equations)
+            for v in eachvariable(equations)
+                boundaries.u[leftright, v, l, m, boundary] = u_face[v]
+            end
+        end
+    end
+    return nothing
+end
+
+function entropy2cons_mortar_storage!(mortar_u, equations, dg, mortar_id)
+    for side in 1:2, m in eachnode(dg), l in eachnode(dg)
+        v_face = SVector(ntuple(@inline(v -> mortar_u[side, v, l, m, mortar_id]),
+                                Val(nvariables(equations))))
+        u_face = entropy2cons(v_face, equations)
+        for v in eachvariable(equations)
+            mortar_u[side, v, l, m, mortar_id] = u_face[v]
+        end
+    end
+    return nothing
+end
+
+function prolong2mortars_gauss!(cache, u, mesh::TreeMesh{3}, equations,
+                                mortar_l2::LobattoLegendreMortarEntropy,
+                                dg::DGSEM{<:GaussLegendreBasis}, entropy::Bool)
+    @unpack fstar_tmp1_threaded, fstar_primary_upper_left_threaded = cache
+    mortars = cache.mortars
+
+    @threaded for mortar in eachmortar(dg, cache)
+        fstar_tmp1 = fstar_tmp1_threaded[Threads.threadid()]
+        # Large-face nodal values. Must not alias `fstar_tmp1`, which
+        # `multiply_dimensionwise!` uses as scratch.
+        u_large = fstar_primary_upper_left_threaded[Threads.threadid()]
+        lower_left_element = mortars.neighbor_ids[1, mortar]
+        lower_right_element = mortars.neighbor_ids[2, mortar]
+        upper_left_element = mortars.neighbor_ids[3, mortar]
+        upper_right_element = mortars.neighbor_ids[4, mortar]
+        large_element = mortars.neighbor_ids[5, mortar]
+        large_dir, small_dir = mortar_face_directions(mortars.large_sides[mortar],
+                                                      mortars.orientations[mortar])
+        leftright_small = mortars.large_sides[mortar] == 1 ? 2 : 1
+        leftright_large = mortars.large_sides[mortar] == 1 ? 1 : 2
+
+        store_gauss_face!(view(mortars.u_upper_left, leftright_small, :, :, :, mortar),
+                          u, equations, dg, upper_left_element, small_dir, entropy)
+        store_gauss_face!(view(mortars.u_upper_right, leftright_small, :, :, :, mortar),
+                          u, equations, dg, upper_right_element, small_dir, entropy)
+        store_gauss_face!(view(mortars.u_lower_left, leftright_small, :, :, :, mortar),
+                          u, equations, dg, lower_left_element, small_dir, entropy)
+        store_gauss_face!(view(mortars.u_lower_right, leftright_small, :, :, :, mortar),
+                          u, equations, dg, lower_right_element, small_dir, entropy)
+        store_gauss_face!(u_large, u, equations, dg, large_element, large_dir, entropy)
+        element_solutions_to_mortars!(mortars, mortar_l2, leftright_large, mortar,
+                                      u_large, fstar_tmp1)
+
+        if entropy
+            entropy2cons_mortar_storage!(mortars.u_upper_left, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_upper_right, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_lower_left, equations, dg, mortar)
+            entropy2cons_mortar_storage!(mortars.u_lower_right, equations, dg, mortar)
+        end
+    end
+    return nothing
+end
+
+function prolong2mortars!(cache, u::AbstractArray, mesh::TreeMesh{3},
+                          equations::AbstractEquationsParabolic,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM{<:GaussLegendreBasis})
+    prolong2mortars_gauss!(cache, u, mesh, equations, mortar_l2, dg, false)
+    return nothing
+end
+
+function prolong2mortars!(cache, u::AbstractArray, mesh::TreeMesh{3}, equations,
+                          mortar_l2::LobattoLegendreMortarEntropy,
+                          dg::DGSEM{<:GaussLegendreBasis})
+    prolong2mortars_gauss!(cache, u, mesh, equations, mortar_l2, dg, true)
+    return nothing
+end
+
+function calc_surface_integral!(backend::Nothing, du, u,
+                                mesh::Union{TreeMesh{3}, StructuredMesh{3}},
+                                equations, surface_integral::SurfaceIntegralWeakForm,
+                                dg::DGSEM{<:GaussLegendreBasis}, cache)
+    @unpack boundary_interpolation_inverse_weights = dg.basis
+    @unpack surface_flux_values = cache.elements
+
+    @threaded for element in eachelement(dg, cache)
+        for m in eachnode(dg), l in eachnode(dg)
+            for v in eachvariable(equations)
+                surface_flux_minus = surface_flux_values[v, l, m, 1, element]
+                surface_flux_plus = surface_flux_values[v, l, m, 2, element]
+                for ii in eachnode(dg)
+                    du[v, ii, l, m, element] = (du[v, ii, l, m, element] -
+                                                surface_flux_minus *
+                                                boundary_interpolation_inverse_weights[ii,
+                                                                                       1])
+                    du[v, ii, l, m, element] = (du[v, ii, l, m, element] +
+                                                surface_flux_plus *
+                                                boundary_interpolation_inverse_weights[ii,
+                                                                                       2])
+                end
+
+                surface_flux_minus = surface_flux_values[v, l, m, 3, element]
+                surface_flux_plus = surface_flux_values[v, l, m, 4, element]
+                for jj in eachnode(dg)
+                    du[v, l, jj, m, element] = (du[v, l, jj, m, element] -
+                                                surface_flux_minus *
+                                                boundary_interpolation_inverse_weights[jj,
+                                                                                       1])
+                    du[v, l, jj, m, element] = (du[v, l, jj, m, element] +
+                                                surface_flux_plus *
+                                                boundary_interpolation_inverse_weights[jj,
+                                                                                       2])
+                end
+
+                surface_flux_minus = surface_flux_values[v, l, m, 5, element]
+                surface_flux_plus = surface_flux_values[v, l, m, 6, element]
+                for kk in eachnode(dg)
+                    du[v, l, m, kk, element] = (du[v, l, m, kk, element] -
+                                                surface_flux_minus *
+                                                boundary_interpolation_inverse_weights[kk,
+                                                                                       1])
+                    du[v, l, m, kk, element] = (du[v, l, m, kk, element] +
+                                                surface_flux_plus *
+                                                boundary_interpolation_inverse_weights[kk,
+                                                                                       2])
+                end
+            end
+        end
+    end
+
+    return nothing
+end

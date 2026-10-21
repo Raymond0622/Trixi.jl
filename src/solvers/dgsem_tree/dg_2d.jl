@@ -2094,18 +2094,12 @@ end
 end
 
 function mortar_face_directions(large_sides, orientation)
-    if large_sides == 1 # small elements on the right / top
-        if orientation == 1
-            return 2, 1 # large +x, small -x
-        else
-            return 4, 3 # large +y, small -y
-        end
-    else # small elements on the left / bottom
-        if orientation == 1
-            return 1, 2 # large -x, small +x
-        else
-            return 3, 4 # large -y, small +y
-        end
+    # `large_sides == 1`: small elements on the positive side of the large element.
+    # Directions are 1:-x, 2:+x, 3:-y, 4:+y, 5:-z, 6:+z.
+    if large_sides == 1
+        return 2 * orientation, 2 * orientation - 1
+    else
+        return 2 * orientation - 1, 2 * orientation
     end
 end
 

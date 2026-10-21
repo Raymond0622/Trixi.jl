@@ -18,7 +18,13 @@ module Trixi
 using Preferences: @load_preference, set_preferences!
 const _PREFERENCE_SQRT = @load_preference("sqrt", "sqrt_Trixi_NaN")
 const _PREFERENCE_LOG = @load_preference("log", "log_Trixi_NaN")
-const _PREFERENCE_THREADING = Symbol(@load_preference("backend", "polyester"))
+# Polyester `@batch` turns the loop body into a `cfunction` closure. Apple Silicon
+# rejects that, which kills checkerboard mortars in the editor REPL. Use Julia's
+# static threads unless a LocalPreferences.toml entry says otherwise.
+const _DEFAULT_THREADING_BACKEND = Sys.isapple() && Sys.ARCH === :aarch64 ? "static" :
+                                    "polyester"
+const _PREFERENCE_THREADING = Symbol(@load_preference("backend",
+                                                      _DEFAULT_THREADING_BACKEND))
 const _PREFERENCE_LOOPVECTORIZATION = @load_preference("loop_vectorization", true)
 const _PREFERENCE_TIMER_BARS = @load_preference("timer_bars", false)
 
