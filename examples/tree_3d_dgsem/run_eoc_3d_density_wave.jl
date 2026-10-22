@@ -1,21 +1,21 @@
-# Gauss-only EOC for the 3D density wave on a checkerboard TreeMesh.
-#   {none, ecav} × polydeg {1, 2, 3, 4}
-# MortarEntropy, levels 3→6, tspan (0, 0.1).
+# Gauss MortarEntropy EOC for the 3D density wave.
+#   conforming and nonconforming (checkerboard) × polydeg {1, 2, 3, 4}
+# ECAV on, levels 3→6, tspan (0, 0.1).
 #
-#   JULIA_NUM_THREADS=128 julia --project=run examples/tree_3d_dgsem/run_eoc_3d_density_wave.jl
+#   JULIA_NUM_THREADS=128 julia --threads=128 --project=<env> examples/tree_3d_dgsem/run_eoc_3d_density_wave.jl
 
 using Trixi
 using OrdinaryDiffEqLowStorageRK
 using OrdinaryDiffEqSSPRK
 using Printf
 
-const CHECKERBOARD = true
-const OUTDIR = joinpath(@__DIR__, "out_eoc_density_wave_checkerboard_L3_gauss128")
+const OUTDIR = joinpath(@__DIR__, "out_eoc_density_wave_gauss_mortarentropy_L3to6")
 mkpath(OUTDIR)
 
 const ELIXIR = joinpath(@__DIR__, "elixir_ecav_3d_density_wave.jl")
+const MESHES = ((false, "conforming"), (true, "nonconforming"))
 const NODES = (("gauss", "gauss"),)
-const CAPTURINGS = ("none", "ecav")
+const CAPTURINGS = ("ecav",)
 const POLYDEGS = (1, 2, 3, 4)
 const EOC_ITERS = 4
 const EOC_LEVEL = 3
@@ -26,22 +26,23 @@ function mean_eoc(eocs, kind, var)
     return sum(col) / length(col)
 end
 
-cases = collect(Iterators.product(NODES, CAPTURINGS, POLYDEGS))
+cases = collect(Iterators.product(MESHES, NODES, CAPTURINGS, POLYDEGS))
 n_cases = length(cases)
 eoc_csv = joinpath(OUTDIR, "eoc.csv")
 open(eoc_csv, "w") do io
     println(io,
-            "case,nodes,capturing,polydeg,status,",
+            "case,mesh,nodes,capturing,polydeg,mortar,status,",
             "mean_l2_rho,mean_l2_rho_v1,mean_l2_rho_v2,mean_l2_rho_v3,mean_l2_rho_e,",
             "eoc_l2_rho_1,eoc_l2_rho_2,eoc_l2_rho_3,",
             "err_l2_rho_L3,err_l2_rho_L4,err_l2_rho_L5,err_l2_rho_L6,elapsed_s")
 end
 
-println("3D density-wave EOC: $n_cases cases, checkerboard=$CHECKERBOARD, levels $EOC_LEVEL to $(EOC_LEVEL + EOC_ITERS - 1), tspan $EOC_TSPAN")
+println("3D density-wave EOC: $n_cases cases, Gauss MortarEntropy, ECAV, levels $EOC_LEVEL to $(EOC_LEVEL + EOC_ITERS - 1), tspan $EOC_TSPAN")
+println("threads = $(Threads.nthreads()), threading backend = $(Trixi._PREFERENCE_THREADING)")
 flush(stdout)
 
-for (icase, ((mortar_nodes, nodes_name), capturing, polydeg)) in enumerate(cases)
-    case = "density_wave_$(capturing)_$(nodes_name)_N$(polydeg)"
+for (icase, ((checkerboard, mesh_name), (mortar_nodes, nodes_name), capturing, polydeg)) in enumerate(cases)
+    case = "density_wave_$(mesh_name)_$(capturing)_$(nodes_name)_N$(polydeg)"
     println()
     println("="^80)
     println("CASE $icase / $n_cases  $case")
@@ -58,7 +59,7 @@ for (icase, ((mortar_nodes, nodes_name), capturing, polydeg)) in enumerate(cases
                                               polydeg = polydeg,
                                               mortar_nodes = mortar_nodes,
                                               shock_capturing = capturing,
-                                              checkerboard = CHECKERBOARD,
+                                              checkerboard = checkerboard,
                                               tspan = EOC_TSPAN,
                                               saveat_times = EOC_TSPAN[2],
                                               initial_refinement_level = EOC_LEVEL)
@@ -78,8 +79,8 @@ for (icase, ((mortar_nodes, nodes_name), capturing, polydeg)) in enumerate(cases
     end
     elapsed = time() - t_case
     open(eoc_csv, "a") do io
-        @printf(io, "%s,%s,%s,%d,%s,%.6e,%.6e,%.6e,%.6e,%.6e,%.4f,%.4f,%.4f,%.6e,%.6e,%.6e,%.6e,%.1f\n",
-                case, nodes_name, capturing, polydeg, status,
+        @printf(io, "%s,%s,%s,%s,%d,MortarEntropy,%s,%.6e,%.6e,%.6e,%.6e,%.6e,%.4f,%.4f,%.4f,%.6e,%.6e,%.6e,%.6e,%.1f\n",
+                case, mesh_name, nodes_name, capturing, polydeg, status,
                 mean_l2[1], mean_l2[2], mean_l2[3], mean_l2[4], mean_l2[5],
                 eoc_l2_rho[1], eoc_l2_rho[2], eoc_l2_rho[3],
                 err_l2_rho[1], err_l2_rho[2], err_l2_rho[3], err_l2_rho[4], elapsed)
