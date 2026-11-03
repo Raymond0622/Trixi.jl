@@ -303,6 +303,146 @@
         return nothing
     end
 
+    # out[:, i, j] = Σ_l A[·, l] * in[:, ...] along one direction of a single element
+    @inline function apply_1d_operator!(out, A, in, direction, mesh::TreeMesh{2},
+                                        equations, dg, element)
+        for j in eachnode(dg), i in eachnode(dg)
+            out_node = zero(get_node_vars(in, equations, dg, i, j, element))
+            for l in eachnode(dg)
+                if direction == 1
+                    out_node = out_node +
+                               A[i, l] * get_node_vars(in, equations, dg, l, j, element)
+                else
+                    out_node = out_node +
+                               A[j, l] * get_node_vars(in, equations, dg, i, l, element)
+                end
+            end
+            set_node_vars!(out, out_node, equations, dg, i, j, element)
+        end
+        return nothing
+    end
+
+    # out = (A ⊗ A) in on a single element; `tmp` is scratch. `out`, `tmp` and
+    # `in` must be distinct arrays.
+    @inline function apply_tensor_operator!(out, tmp, A, in, mesh::TreeMesh{2},
+                                            equations, dg, element)
+        apply_1d_operator!(tmp, A, in, 1, mesh, equations, dg, element)
+        apply_1d_operator!(out, A, tmp, 2, mesh, equations, dg, element)
+        return nothing
+    end
+
+    # Symmetric SVV: the SVV flux is F*(K(u) F∇v) with F = F1D ⊗ F1D and
+    # F* = W⁻¹ Fᵀ W its adjoint in the discrete L2 inner product. Its dissipation
+    #   ⟨∇v, F*(K F∇v)⟩_W = ⟨F∇v, K F∇v⟩_W ≥ 0
+    # is computed exactly, so c_ecav D + c_svv D_svv = min(0, r) is what is
+    # actually dissipated.
+    function calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                         filtered_parabolic, filtered_gradients,
+                                         tmp_gradient, tmp_parabolic,
+                                         entropy_residual, equations,
+                                         equations_artificial_viscosity,
+                                         mesh::TreeMesh{2}, dg, cache)
+        flux_parabolic_x, flux_parabolic_y = flux_parabolic
+        gradients_x, gradients_y = gradients
+        filtered_gradients_x, filtered_gradients_y = filtered_gradients
+        svv_flux_x, svv_flux_y = tmp_parabolic
+        filtered_parabolic_x, filtered_parabolic_y = filtered_parabolic
+
+        (; F1D, F1D_star) = cache
+        @threaded for element in eachelement(dg, cache)
+            volume_jacobian_ = volume_jacobian(element, mesh, cache)
+
+            # calculate viscous dissipation (ECAV denominator)
+            element_viscous_dissipation = zero(real(dg))
+            for j in eachnode(dg), i in eachnode(dg)
+                flux_viscous_x_node = get_node_vars(flux_parabolic_x, equations, dg, i, j,
+                                                    element)
+                flux_viscous_y_node = get_node_vars(flux_parabolic_y, equations, dg, i, j,
+                                                    element)
+                gradients_x_node = get_node_vars(gradients_x, equations, dg, i, j, element)
+                gradients_y_node = get_node_vars(gradients_y, equations, dg, i, j, element)
+
+                viscous_dissipation_x = dot(flux_viscous_x_node, gradients_x_node)
+                viscous_dissipation_y = dot(flux_viscous_y_node, gradients_y_node)
+
+                weight_ij = dg.basis.weights[i] * dg.basis.weights[j]
+                element_viscous_dissipation = element_viscous_dissipation +
+                                              (viscous_dissipation_x +
+                                               viscous_dissipation_y) * weight_ij *
+                                              volume_jacobian_
+            end
+
+            # F∇v
+            for dim in 1:2
+                apply_tensor_operator!(filtered_gradients[dim], tmp_gradient[dim], F1D,
+                                       gradients[dim], mesh, equations, dg, element)
+            end
+
+            # K(u) F∇v and the SVV dissipation ⟨F∇v, K F∇v⟩_W
+            svv_element_viscous_dissipation = zero(real(dg))
+            for j in eachnode(dg), i in eachnode(dg)
+                u_node = get_node_vars(u_transformed, equations, dg, i, j, element)
+                filtered_gradients_x_node = get_node_vars(filtered_gradients_x, equations,
+                                                          dg, i, j, element)
+                filtered_gradients_y_node = get_node_vars(filtered_gradients_y, equations,
+                                                          dg, i, j, element)
+                filtered_gradients_node = (filtered_gradients_x_node,
+                                           filtered_gradients_y_node)
+                svv_flux_x_node = flux(u_node, filtered_gradients_node, 1,
+                                       equations_artificial_viscosity)
+                svv_flux_y_node = flux(u_node, filtered_gradients_node, 2,
+                                       equations_artificial_viscosity)
+                set_node_vars!(svv_flux_x, svv_flux_x_node, equations, dg, i, j, element)
+                set_node_vars!(svv_flux_y, svv_flux_y_node, equations, dg, i, j, element)
+
+                svv_viscous_dissipation_x = dot(svv_flux_x_node, filtered_gradients_x_node)
+                svv_viscous_dissipation_y = dot(svv_flux_y_node, filtered_gradients_y_node)
+
+                weight_ij = dg.basis.weights[i] * dg.basis.weights[j]
+                svv_element_viscous_dissipation = svv_element_viscous_dissipation +
+                                                  (svv_viscous_dissipation_x +
+                                                   svv_viscous_dissipation_y) *
+                                                  weight_ij * volume_jacobian_
+            end
+
+            # F*(K(u) F∇v); `tmp_gradient` is free again and serves as scratch
+            for dim in 1:2
+                apply_tensor_operator!(filtered_parabolic[dim], tmp_gradient[dim], F1D_star,
+                                       tmp_parabolic[dim], mesh, equations, dg, element)
+            end
+
+            # Scale viscous flux by ecav coefficient.
+            # Note: we usually use "-min(0, entropy_residual)" to define the ECAV coefficient, but we
+            # flip the sign to account for the fact that viscous terms are negated by convention in Trixi.jl.
+            w = 1.0
+            num = min(0, entropy_residual[element])
+            denom = element_viscous_dissipation * element_viscous_dissipation +
+                    w * svv_element_viscous_dissipation * svv_element_viscous_dissipation
+            ecav_coefficient = (num * element_viscous_dissipation) / (denom + 1e-12)
+            svv_coefficient = (w * num * svv_element_viscous_dissipation) / (denom + 1e-12)
+
+            cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
+            cache.artificial_viscosity.svv_coefficients[element] = -svv_coefficient # save output
+            # Do not index `flux_parabolic` inside `@threaded`: the name shadows
+            # `Trixi.flux_parabolic`, so Polyester would capture it in a closure.
+            for j in eachnode(dg), i in eachnode(dg)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_x,
+                                                    ecav_coefficient, svv_coefficient,
+                                                    get_node_vars(filtered_parabolic_x,
+                                                                  equations, dg, i, j,
+                                                                  element),
+                                                    equations, dg, i, j, element)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_y,
+                                                    ecav_coefficient, svv_coefficient,
+                                                    get_node_vars(filtered_parabolic_y,
+                                                                  equations, dg, i, j,
+                                                                  element),
+                                                    equations, dg, i, j, element)
+            end
+        end
+        return nothing
+    end
+
     function rhs_artificial_viscosity!(du, u, t, mesh::TreeMesh{2},
                                        equations, equations_parabolic,
                                        equations_artificial_viscosity,
@@ -414,7 +554,9 @@
                            boundary_conditions, boundary_conditions_parabolic,
                            source_terms::Source,
                            dg::DG, parabolic_scheme, cache, cache_parabolic) where {Source}
-        (; u_transformed, flux_parabolic, gradients) = cache_parabolic.parabolic_container
+        (; u_transformed, flux_parabolic, gradients, filtered_gradients,
+        filtered_parabolic, tmp_gradient, tmp_parabolic) = cache_parabolic.parabolic_container
+        (; ecav_choice) = cache
         backend = trixi_backend(u)
         # Reset du
         @trixi_timeit_ext backend timer() "reset ∂u/∂t" begin
@@ -502,9 +644,16 @@
                                    equations_artificial_viscosity, dg, cache)
         end
 
-        calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual, equations,
-                                mesh,
-                                dg, cache)
+        if ecav_choice == :ecav_svv
+            calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                        filtered_parabolic, filtered_gradients,
+                                        tmp_gradient, tmp_parabolic,
+                                        entropy_residual, equations,
+                                        equations_artificial_viscosity, mesh, dg, cache)
+        else
+            calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
+                                    equations, mesh, dg, cache)
+        end
 
         # # TODO: accumulate into flux_parabolic instead
         # # accumulate the AV term

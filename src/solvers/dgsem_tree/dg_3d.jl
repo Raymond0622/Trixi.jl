@@ -1636,7 +1636,9 @@ end
 # `entropy2cons`. Parabolic traces pass `entropy = false`.
 function prolong2mortars_lgl!(cache, u, mesh::TreeMesh{3}, equations,
                               mortar_l2::LobattoLegendreMortarEntropy,
-                              dg::DGSEM{<:LobattoLegendreBasis}, entropy::Bool)
+                              dg::DGSEM{<:LobattoLegendreBasis}, entropy_variables::Bool)
+    # Not named `entropy`: that shadows `Trixi.entropy`, and Polyester then
+    # captures it in a closure, which fails inside `@threaded` on aarch64.
     @unpack fstar_tmp1_threaded, fstar_primary_upper_left_threaded = cache
     mortars = cache.mortars
 
@@ -1650,21 +1652,21 @@ function prolong2mortars_lgl!(cache, u, mesh::TreeMesh{3}, equations,
 
         store_lgl_face!(view(mortars.u_lower_left, leftright_small, :, :, :, mortar),
                         u, equations, dg, mortars.neighbor_ids[1, mortar], small_dir,
-                        entropy)
+                        entropy_variables)
         store_lgl_face!(view(mortars.u_lower_right, leftright_small, :, :, :, mortar),
                         u, equations, dg, mortars.neighbor_ids[2, mortar], small_dir,
-                        entropy)
+                        entropy_variables)
         store_lgl_face!(view(mortars.u_upper_left, leftright_small, :, :, :, mortar),
                         u, equations, dg, mortars.neighbor_ids[3, mortar], small_dir,
-                        entropy)
+                        entropy_variables)
         store_lgl_face!(view(mortars.u_upper_right, leftright_small, :, :, :, mortar),
                         u, equations, dg, mortars.neighbor_ids[4, mortar], small_dir,
-                        entropy)
+                        entropy_variables)
         store_lgl_face!(u_large, u, equations, dg, mortars.neighbor_ids[5, mortar],
-                        large_dir, entropy)
+                        large_dir, entropy_variables)
         element_solutions_to_mortars!(mortars, mortar_l2, leftright_large, mortar,
                                       u_large, fstar_tmp1)
-        if entropy
+        if entropy_variables
             entropy2cons_mortar_storage!(mortars.u_upper_left, equations, dg, mortar)
             entropy2cons_mortar_storage!(mortars.u_upper_right, equations, dg, mortar)
             entropy2cons_mortar_storage!(mortars.u_lower_left, equations, dg, mortar)
@@ -1869,7 +1871,9 @@ end
 
 function prolong2mortars_gauss!(cache, u, mesh::TreeMesh{3}, equations,
                                 mortar_l2::LobattoLegendreMortarEntropy,
-                                dg::DGSEM{<:GaussLegendreBasis}, entropy::Bool)
+                                dg::DGSEM{<:GaussLegendreBasis}, entropy_variables::Bool)
+    # Not named `entropy`: that shadows `Trixi.entropy`, and Polyester then
+    # captures it in a closure, which fails inside `@threaded` on aarch64.
     @unpack fstar_tmp1_threaded, fstar_primary_upper_left_threaded = cache
     mortars = cache.mortars
 
@@ -1889,18 +1893,18 @@ function prolong2mortars_gauss!(cache, u, mesh::TreeMesh{3}, equations,
         leftright_large = mortars.large_sides[mortar] == 1 ? 1 : 2
 
         store_gauss_face!(view(mortars.u_upper_left, leftright_small, :, :, :, mortar),
-                          u, equations, dg, upper_left_element, small_dir, entropy)
+                          u, equations, dg, upper_left_element, small_dir, entropy_variables)
         store_gauss_face!(view(mortars.u_upper_right, leftright_small, :, :, :, mortar),
-                          u, equations, dg, upper_right_element, small_dir, entropy)
+                          u, equations, dg, upper_right_element, small_dir, entropy_variables)
         store_gauss_face!(view(mortars.u_lower_left, leftright_small, :, :, :, mortar),
-                          u, equations, dg, lower_left_element, small_dir, entropy)
+                          u, equations, dg, lower_left_element, small_dir, entropy_variables)
         store_gauss_face!(view(mortars.u_lower_right, leftright_small, :, :, :, mortar),
-                          u, equations, dg, lower_right_element, small_dir, entropy)
-        store_gauss_face!(u_large, u, equations, dg, large_element, large_dir, entropy)
+                          u, equations, dg, lower_right_element, small_dir, entropy_variables)
+        store_gauss_face!(u_large, u, equations, dg, large_element, large_dir, entropy_variables)
         element_solutions_to_mortars!(mortars, mortar_l2, leftright_large, mortar,
                                       u_large, fstar_tmp1)
 
-        if entropy
+        if entropy_variables
             entropy2cons_mortar_storage!(mortars.u_upper_left, equations, dg, mortar)
             entropy2cons_mortar_storage!(mortars.u_upper_right, equations, dg, mortar)
             entropy2cons_mortar_storage!(mortars.u_lower_left, equations, dg, mortar)

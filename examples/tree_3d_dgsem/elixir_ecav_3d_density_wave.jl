@@ -41,7 +41,7 @@ polydeg = 2
 mortar_nodes = "gauss"
 shock_capturing = "ecav"
 checkerboard = true
-surface_flux = flux_lax_friedrichs
+surface_flux = flux_ranocha
 
 if mortar_nodes == "gauss"
     basis = GaussLegendreBasis(polydeg)

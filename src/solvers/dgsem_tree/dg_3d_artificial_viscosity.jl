@@ -85,43 +85,72 @@
         #return res
     end
 
-    function calc_ecav_svv_coefficients!(flux_parabolic, gradients, 
-            filtered_parabolic, filtered_gradients, tmp_gradient, tmp_parabolic,
-                entropy_residual, equations, mesh::TreeMesh{3}, dg, cache) 
-                
+    # out[:, i, j, k] = Σ_l A[·, l] * in[:, ...] along one direction of a single element
+    @inline function apply_1d_operator!(out, A, in, direction, mesh::TreeMesh{3},
+                                        equations, dg, element)
+        for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
+            out_node = zero(get_node_vars(in, equations, dg, i, j, k, element))
+            for l in eachnode(dg)
+                if direction == 1
+                    out_node = out_node +
+                               A[i, l] * get_node_vars(in, equations, dg, l, j, k, element)
+                elseif direction == 2
+                    out_node = out_node +
+                               A[j, l] * get_node_vars(in, equations, dg, i, l, k, element)
+                else
+                    out_node = out_node +
+                               A[k, l] * get_node_vars(in, equations, dg, i, j, l, element)
+                end
+            end
+            set_node_vars!(out, out_node, equations, dg, i, j, k, element)
+        end
+        return nothing
+    end
+
+    # out = (A ⊗ A ⊗ A) in on a single element; `tmp` is scratch. `out`, `tmp` and
+    # `in` must be distinct arrays.
+    @inline function apply_tensor_operator!(out, tmp, A, in, mesh::TreeMesh{3},
+                                            equations, dg, element)
+        apply_1d_operator!(out, A, in, 1, mesh, equations, dg, element)
+        apply_1d_operator!(tmp, A, out, 2, mesh, equations, dg, element)
+        apply_1d_operator!(out, A, tmp, 3, mesh, equations, dg, element)
+        return nothing
+    end
+
+    # Symmetric SVV: the SVV flux is F*(K(u) F∇v) with F = F1D ⊗ F1D ⊗ F1D and
+    # F* = W⁻¹ Fᵀ W its adjoint in the discrete L2 inner product. Its dissipation
+    #   ⟨∇v, F*(K F∇v)⟩_W = ⟨F∇v, K F∇v⟩_W ≥ 0
+    # is computed exactly, so c_ecav D + c_svv D_svv = min(0, r) is what is
+    # actually dissipated.
+    function calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                         filtered_parabolic, filtered_gradients,
+                                         tmp_gradient, tmp_parabolic,
+                                         entropy_residual, equations,
+                                         equations_artificial_viscosity,
+                                         mesh::TreeMesh{3}, dg, cache)
         flux_parabolic_x, flux_parabolic_y, flux_parabolic_z = flux_parabolic
         gradients_x, gradients_y, gradients_z = gradients
+        filtered_gradients_x, filtered_gradients_y, filtered_gradients_z = filtered_gradients
+        svv_flux_x, svv_flux_y, svv_flux_z = tmp_parabolic
+        filtered_parabolic_x, filtered_parabolic_y, filtered_parabolic_z = filtered_parabolic
 
-        tmp_gradient_x, tmp_gradient_y, tmp_gradient_z = tmp_gradient
-        tmp_parabolic_x, tmp_parabolic_y, tmp_parabolic_z = tmp_parabolic
-
-        filtered_gradients_x, filtered_gradients_y, 
-            filtered_gradients_z = filtered_gradients
-
-        filtered_flux_parabolic_x, filtered_flux_parabolic_y, 
-            filtered_flux_parabolic_z = filtered_parabolic
-
-        (; F1D) = cache
+        (; F1D, F1D_star) = cache
         @threaded for element in eachelement(dg, cache)
             volume_jacobian_ = volume_jacobian(element, mesh, cache)
 
             # calculate viscous dissipation (ECAV denominator)
             element_viscous_dissipation = zero(real(dg))
-            svv_element_viscous_dissipation = zero(real(dg))
-            # allocate memory to store svv viscous flux per node wise since
-            # we don't want to allocate another flux_viscous type of object.
-            # we will accumulate the svv fluxes into flux_viscous to save memory.
             for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-                flux_viscous_x_node = get_node_vars(flux_parabolic_x, equations, dg, i, j, k, 
+                flux_viscous_x_node = get_node_vars(flux_parabolic_x, equations, dg, i, j, k,
                                                     element)
-                flux_viscous_y_node = get_node_vars(flux_parabolic_y, equations, dg, i, j, k, 
+                flux_viscous_y_node = get_node_vars(flux_parabolic_y, equations, dg, i, j, k,
                                                     element)
-                flux_viscous_z_node = get_node_vars(flux_parabolic_z, equations, dg, i, j, k, 
+                flux_viscous_z_node = get_node_vars(flux_parabolic_z, equations, dg, i, j, k,
                                                     element)
                 gradients_x_node = get_node_vars(gradients_x, equations, dg, i, j, k, element)
                 gradients_y_node = get_node_vars(gradients_y, equations, dg, i, j, k, element)
                 gradients_z_node = get_node_vars(gradients_z, equations, dg, i, j, k, element)
-                
+
                 viscous_dissipation_x = dot(flux_viscous_x_node, gradients_x_node)
                 viscous_dissipation_y = dot(flux_viscous_y_node, gradients_y_node)
                 viscous_dissipation_z = dot(flux_viscous_z_node, gradients_z_node)
@@ -129,178 +158,91 @@
                 weight_ijk = dg.basis.weights[i] * dg.basis.weights[j] * dg.basis.weights[k]
                 element_viscous_dissipation = element_viscous_dissipation +
                                               (viscous_dissipation_x +
-                                               viscous_dissipation_y + 
-                                                viscous_dissipation_z) * weight_ijk *
+                                               viscous_dissipation_y +
+                                               viscous_dissipation_z) * weight_ijk *
                                               volume_jacobian_
             end
-            filtered_gradient_node_x = similar(get_node_vars(gradients_x, equations, dg, 1, 1, 1, 1));
-            filtered_flux_parabolic_node_x = similar(filtered_gradient_node_x)
-            filtered_gradient_node_y = similar(filtered_gradient_node_x)
-            filtered_flux_parabolic_node_y = similar(filtered_gradient_node_x)
-            filtered_gradient_node_z = similar(filtered_gradient_node_x);
-            filtered_flux_parabolic_node_z = similar(filtered_gradient_node_x);
 
-            for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-                fill!(filtered_gradient_node_x, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_x, zero(real(dg)))
-                fill!(filtered_gradient_node_y, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_y, zero(real(dg)))
-                fill!(filtered_gradient_node_z, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_z, zero(real(dg)))
-                for ii in eachnode(dg)
-                    Fval = F1D[i, ii]
-                    tmp_gradient_x_node = get_node_vars(gradients_x, equations, dg, ii, j, k, element)
-                    tmp_parabolic_x_node = get_node_vars(flux_parabolic_x, equations, dg, ii, j, k, element)
-
-                    tmp_gradient_y_node = get_node_vars(gradients_y, equations, dg, ii, j, k, element)
-                    tmp_parabolic_y_node = get_node_vars(flux_parabolic_y, equations, dg, ii, j, k, element)
-
-                    tmp_gradient_z_node = get_node_vars(gradients_z, equations, dg, ii, j, k, element)
-                    tmp_parabolic_z_node = get_node_vars(flux_parabolic_z, equations, dg, ii, j, k, element)
-                    @simd for v in 1:5
-                        filtered_gradient_node_x[v] += Fval * tmp_gradient_x_node[v]
-                        filtered_flux_parabolic_node_x[v] += Fval * tmp_parabolic_x_node[v]
-
-                        filtered_gradient_node_y[v] += Fval * tmp_gradient_y_node[v]
-                        filtered_flux_parabolic_node_y[v] += Fval * tmp_parabolic_y_node[v]
-
-                        filtered_gradient_node_z[v] += Fval * tmp_gradient_z_node[v]
-                        filtered_flux_parabolic_node_z[v] += Fval * tmp_parabolic_z_node[v]
-                    end
-                end
-                set_node_vars!(filtered_gradients_x, filtered_gradient_node_x, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_x, filtered_flux_parabolic_node_x, equations, dg, i, j, k, element);
-
-                set_node_vars!(filtered_gradients_y, filtered_gradient_node_y, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_y, filtered_flux_parabolic_node_y, equations, dg, i, j, k, element);
-
-                set_node_vars!(filtered_gradients_z, filtered_gradient_node_z, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_z, filtered_flux_parabolic_node_z, equations, dg, i, j, k, element);
+            # F∇v
+            for dim in 1:3
+                apply_tensor_operator!(filtered_gradients[dim], tmp_gradient[dim], F1D,
+                                       gradients[dim], mesh, equations, dg, element)
             end
 
+            # K(u) F∇v and the SVV dissipation ⟨F∇v, K F∇v⟩_W
+            svv_element_viscous_dissipation = zero(real(dg))
             for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-                fill!(filtered_gradient_node_x, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_x, zero(real(dg)))
-                fill!(filtered_gradient_node_y, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_y, zero(real(dg)))
-                fill!(filtered_gradient_node_z, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_z, zero(real(dg)))
-                for jj in eachnode(dg)
-                    Fval = F1D[j, jj]
-                    tmp_gradient_x_node = get_node_vars(filtered_gradients_x, equations, dg, i, jj, k, element)
-                    tmp_parabolic_x_node = get_node_vars(filtered_flux_parabolic_x, equations, dg, i, jj, k, element)
+                u_node = get_node_vars(u_transformed, equations, dg, i, j, k, element)
+                filtered_gradients_x_node = get_node_vars(filtered_gradients_x, equations,
+                                                          dg, i, j, k, element)
+                filtered_gradients_y_node = get_node_vars(filtered_gradients_y, equations,
+                                                          dg, i, j, k, element)
+                filtered_gradients_z_node = get_node_vars(filtered_gradients_z, equations,
+                                                          dg, i, j, k, element)
+                filtered_gradients_node = (filtered_gradients_x_node,
+                                           filtered_gradients_y_node,
+                                           filtered_gradients_z_node)
+                svv_flux_x_node = flux(u_node, filtered_gradients_node, 1,
+                                       equations_artificial_viscosity)
+                svv_flux_y_node = flux(u_node, filtered_gradients_node, 2,
+                                       equations_artificial_viscosity)
+                svv_flux_z_node = flux(u_node, filtered_gradients_node, 3,
+                                       equations_artificial_viscosity)
+                set_node_vars!(svv_flux_x, svv_flux_x_node, equations, dg, i, j, k, element)
+                set_node_vars!(svv_flux_y, svv_flux_y_node, equations, dg, i, j, k, element)
+                set_node_vars!(svv_flux_z, svv_flux_z_node, equations, dg, i, j, k, element)
 
-                    tmp_gradient_y_node = get_node_vars(filtered_gradients_y, equations, dg, i, jj, k, element)
-                    tmp_parabolic_y_node = get_node_vars(filtered_flux_parabolic_y, equations, dg, i, jj, k, element)
-
-                    tmp_gradient_z_node = get_node_vars(filtered_gradients_z, equations, dg, i, jj, k, element)
-                    tmp_parabolic_z_node = get_node_vars(filtered_flux_parabolic_z, equations, dg, i, jj, k, element)
-                    @simd for v in 1:5
-                        filtered_gradient_node_x[v] += Fval * tmp_gradient_x_node[v]
-                        filtered_flux_parabolic_node_x[v] += Fval * tmp_parabolic_x_node[v]
-
-                        filtered_gradient_node_y[v] += Fval * tmp_gradient_y_node[v]
-                        filtered_flux_parabolic_node_y[v] += Fval * tmp_parabolic_y_node[v]
-
-                        filtered_gradient_node_z[v] += Fval * tmp_gradient_z_node[v]
-                        filtered_flux_parabolic_node_z[v] += Fval * tmp_parabolic_z_node[v]
-                    end
-                end
-                set_node_vars!(tmp_gradient_x, filtered_gradient_node_x, equations, dg, i, j, k, element);
-                set_node_vars!(tmp_parabolic_x, filtered_flux_parabolic_node_x, equations, dg, i, j, k, element);
-
-                set_node_vars!(tmp_gradient_y, filtered_gradient_node_y, equations, dg, i, j, k, element);
-                set_node_vars!(tmp_parabolic_y, filtered_flux_parabolic_node_y, equations, dg, i, j, k, element);
-
-                set_node_vars!(tmp_gradient_z, filtered_gradient_node_z, equations, dg, i, j, k, element);
-                set_node_vars!(tmp_parabolic_z, filtered_flux_parabolic_node_z, equations, dg, i, j, k, element);
-            end
-
-            for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-                fill!(filtered_gradient_node_x, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_x, zero(real(dg)))
-                fill!(filtered_gradient_node_y, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_y, zero(real(dg)))
-                fill!(filtered_gradient_node_z, zero(real(dg)))
-                fill!(filtered_flux_parabolic_node_z, zero(real(dg)))
-                for kk in eachnode(dg)
-                    Fval = F1D[k, kk]
-                    tmp_gradient_x_node = get_node_vars(tmp_gradient_x, equations, dg, i, j, kk, element)
-                    tmp_parabolic_x_node = get_node_vars(tmp_parabolic_x, equations, dg, i, j, kk, element)
-
-                    tmp_gradient_y_node = get_node_vars(tmp_gradient_y, equations, dg, i, j, kk, element)
-                    tmp_parabolic_y_node = get_node_vars(tmp_parabolic_y, equations, dg, i, j, kk, element)
-
-                    tmp_gradient_z_node = get_node_vars(tmp_gradient_z, equations, dg, i, j, kk, element)
-                    tmp_parabolic_z_node = get_node_vars(tmp_parabolic_z, equations, dg, i, j, kk, element)
-                    @simd for v in eachvariable(equations)
-                        filtered_gradient_node_x[v] += Fval * tmp_gradient_x_node[v]
-                        filtered_flux_parabolic_node_x[v] += Fval * tmp_parabolic_x_node[v]
-
-                        filtered_gradient_node_y[v] += Fval * tmp_gradient_y_node[v]
-                        filtered_flux_parabolic_node_y[v] += Fval * tmp_parabolic_y_node[v]
-
-                        filtered_gradient_node_z[v] += Fval * tmp_gradient_z_node[v]
-                        filtered_flux_parabolic_node_z[v] += Fval * tmp_parabolic_z_node[v]
-                    end
-                end 
-                set_node_vars!(filtered_gradients_x, filtered_gradient_node_x, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_x, filtered_flux_parabolic_node_x, equations, dg, i, j, k, element);
-
-                set_node_vars!(filtered_gradients_y, filtered_gradient_node_y, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_y, filtered_flux_parabolic_node_y, equations, dg, i, j, k, element);
-
-                set_node_vars!(filtered_gradients_z, filtered_gradient_node_z, equations, dg, i, j, k, element);
-                set_node_vars!(filtered_flux_parabolic_z, filtered_flux_parabolic_node_z, equations, dg, i, j, k, element);
-            end
-
-
-            for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-                filtered_flux_viscous_x_node = get_node_vars(filtered_flux_parabolic_x, equations, dg, i, j, k, 
-                                                    element)
-                filtered_flux_viscous_y_node = get_node_vars(filtered_flux_parabolic_y, equations, dg, i, j, k, 
-                                                    element)
-                filtered_flux_viscous_z_node = get_node_vars(filtered_flux_parabolic_z, equations, dg, i, j, k, 
-                                                    element)
-                filtered_gradients_x_node = get_node_vars(filtered_gradients_x, equations, dg, i, j, k, element)
-                filtered_gradients_y_node = get_node_vars(filtered_gradients_y, equations, dg, i, j, k, element)
-                filtered_gradients_z_node = get_node_vars(filtered_gradients_z, equations, dg, i, j, k, element)
-                
-                svv_viscous_dissipation_x = dot(filtered_flux_viscous_x_node, filtered_gradients_x_node)
-                svv_viscous_dissipation_y = dot(filtered_flux_viscous_y_node, filtered_gradients_y_node)
-                svv_viscous_dissipation_z = dot(filtered_flux_viscous_z_node, filtered_gradients_z_node)
+                svv_viscous_dissipation_x = dot(svv_flux_x_node, filtered_gradients_x_node)
+                svv_viscous_dissipation_y = dot(svv_flux_y_node, filtered_gradients_y_node)
+                svv_viscous_dissipation_z = dot(svv_flux_z_node, filtered_gradients_z_node)
 
                 weight_ijk = dg.basis.weights[i] * dg.basis.weights[j] * dg.basis.weights[k]
                 svv_element_viscous_dissipation = svv_element_viscous_dissipation +
-                                              (svv_viscous_dissipation_x +
-                                               svv_viscous_dissipation_y + 
-                                                svv_viscous_dissipation_z) * weight_ijk *
-                                              volume_jacobian_
+                                                  (svv_viscous_dissipation_x +
+                                                   svv_viscous_dissipation_y +
+                                                   svv_viscous_dissipation_z) *
+                                                  weight_ijk * volume_jacobian_
             end
+
+            # F*(K(u) F∇v); `tmp_gradient` is free again and serves as scratch
+            for dim in 1:3
+                apply_tensor_operator!(filtered_parabolic[dim], tmp_gradient[dim], F1D_star,
+                                       tmp_parabolic[dim], mesh, equations, dg, element)
+            end
+
             # Scale viscous flux by ecav coefficient.
             # Note: we usually use "-min(0, entropy_residual)" to define the ECAV coefficient, but we
             # flip the sign to account for the fact that viscous terms are negated by convention in Trixi.jl.
             w = 1.0
             num = min(0, entropy_residual[element])
-            denom = element_viscous_dissipation * element_viscous_dissipation + 
+            denom = element_viscous_dissipation * element_viscous_dissipation +
                     w * svv_element_viscous_dissipation * svv_element_viscous_dissipation
             ecav_coefficient = (num * element_viscous_dissipation) / (denom + 1e-12)
-            svv_coefficient = (w* num * svv_element_viscous_dissipation) /(denom + 1e-12)
+            svv_coefficient = (w * num * svv_element_viscous_dissipation) / (denom + 1e-12)
 
             cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
             cache.artificial_viscosity.svv_coefficients[element] = -svv_coefficient # save output
+            # Do not index `flux_parabolic` inside `@threaded`: the name shadows
+            # `Trixi.flux_parabolic`, so Polyester would capture it in a closure.
             for k in eachnode(dg), j in eachnode(dg), i in eachnode(dg)
-
-                filtered_flux_parabolic_x_node = get_node_vars(filtered_flux_parabolic_x, equations, dg, i, j, k, element)
-                filtered_flux_parabolic_y_node = get_node_vars(filtered_flux_parabolic_y, equations, dg, i, j, k, element)
-                filtered_flux_parabolic_z_node = get_node_vars(filtered_flux_parabolic_z, equations, dg, i, j, k, element)
-
-                multiply_multiply_add_to_node_vars!(flux_parabolic_x, ecav_coefficient, svv_coefficient, filtered_flux_parabolic_x_node, 
-                                        equations, dg, i, j, k, element)
-                multiply_multiply_add_to_node_vars!(flux_parabolic_y, ecav_coefficient, svv_coefficient, filtered_flux_parabolic_y_node, 
-                                        equations, dg, i, j, k, element)
-                multiply_multiply_add_to_node_vars!(flux_parabolic_z, ecav_coefficient, svv_coefficient, filtered_flux_parabolic_z_node, 
-                                        equations, dg, i, j, k, element)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_x,
+                                                    ecav_coefficient, svv_coefficient,
+                                                    get_node_vars(filtered_parabolic_x,
+                                                                  equations, dg, i, j, k,
+                                                                  element),
+                                                    equations, dg, i, j, k, element)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_y,
+                                                    ecav_coefficient, svv_coefficient,
+                                                    get_node_vars(filtered_parabolic_y,
+                                                                  equations, dg, i, j, k,
+                                                                  element),
+                                                    equations, dg, i, j, k, element)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_z,
+                                                    ecav_coefficient, svv_coefficient,
+                                                    get_node_vars(filtered_parabolic_z,
+                                                                  equations, dg, i, j, k,
+                                                                  element),
+                                                    equations, dg, i, j, k, element)
             end
         end
         return nothing
@@ -344,7 +286,7 @@
             ecav_coefficient = regularized_ratio(min(0, entropy_residual[element]),
                                                  element_viscous_dissipation)
 
-            #ecav_coefficient = entropy_residual[element]/element_viscous_dissipation
+            ecav_coefficient = entropy_residual[element]/element_viscous_dissipation
             #ecav_coefficient = 0.0;   
             #cache.artificial_viscosity.norm_coefficients[end] += ecav_coefficient * ecav_coefficient        
             cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
@@ -648,9 +590,11 @@
             calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual, equations, mesh,
                                     dg, cache)
         elseif (ecav_choice == :ecav_svv)
-            calc_ecav_svv_coefficients!(flux_parabolic, gradients, 
-                filtered_parabolic, filtered_gradients, tmp_gradient, tmp_parabolic,
-                entropy_residual, equations, mesh, dg, cache)
+            calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                        filtered_parabolic, filtered_gradients,
+                                        tmp_gradient, tmp_parabolic,
+                                        entropy_residual, equations,
+                                        equations_artificial_viscosity, mesh, dg, cache)
         elseif (ecav_choice == :ecav_ducros)
             (; sensor) = cache.artificial_viscosity
             calc_ecav_ducros_coefficients!(u, sensor, 

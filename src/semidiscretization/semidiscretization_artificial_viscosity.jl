@@ -89,7 +89,13 @@ function SemidiscretizationArtificialViscosity(mesh, equations::Tuple,
     cache = create_cache(mesh, equations, solver, RealT, uEltype)
 
     F1D = VDM * Diagonal(filter) * inv(VDM);
-    cache = (; cache..., F1D, filter, ecav_choice,
+    # Adjoint of the filter in the discrete L2 inner product, F* = W⁻¹ Fᵀ W.
+    # SVV uses the flux F*(K(u) F∇v), whose dissipation ⟨F∇v, K F∇v⟩_W is ≥ 0.
+    # For LGL nodes F* ≠ F, since LGL quadrature does not integrate the
+    # highest Legendre mode exactly (for Gauss nodes F* = F up to round-off).
+    W = Diagonal(solver.basis.weights)
+    F1D_star = inv(W) * transpose(F1D) * W
+    cache = (; cache..., F1D, F1D_star, filter, ecav_choice,
              artificial_viscosity =
              create_cache(mesh, artificial_viscosity, solver, cache, RealT, uEltype))
 
