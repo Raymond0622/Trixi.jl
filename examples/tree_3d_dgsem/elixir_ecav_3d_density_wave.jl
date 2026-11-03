@@ -77,13 +77,15 @@ if checkerboard
     Trixi.refine!(mesh.tree, cells_to_refine)
 end
 
+# With `shock_capturing = "ecav"` (a string so `trixi_include` can override it):
+#   ecav_choice = "ecav"      → ECAV only
+#   ecav_choice = "ecav_svv"  → ECAV + SVV (Legendre filter ((m - 1) / N)^2 by default;
+#                               pass `VDM` / `filter` to the constructor to change it)
+ecav_choice = "ecav"
 if shock_capturing == "ecav"
-    n = polydeg + 1
     semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
                                                  initial_condition, solver;
-                                                 VDM = Matrix{Float64}(I, n, n),
-                                                 filter = ones(n),
-                                                 ecav_choice = :ecav,
+                                                 ecav_choice = ecav_choice,
                                                  combine_rhs = Trixi.True(),
                                                  solver_parabolic = solver_parabolic,
                                                  boundary_conditions = (boundary_condition_periodic,

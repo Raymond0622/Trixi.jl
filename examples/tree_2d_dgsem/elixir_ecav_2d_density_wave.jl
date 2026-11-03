@@ -106,14 +106,15 @@ end
 # "ecav" → entropy-correction AV (combined hyperbolic + viscous RHS, mortar ψ
 #          residual). "none" → hyperbolic only.
 shock_capturing = "ecav"
+# With `shock_capturing = "ecav"` (a string so `trixi_include` can override it):
+#   ecav_choice = "ecav"      → ECAV only
+#   ecav_choice = "ecav_svv"  → ECAV + SVV (Legendre filter ((m - 1) / N)^2 by default;
+#                               pass `VDM` / `filter` to the constructor to change it)
+ecav_choice = "ecav"
 if shock_capturing == "ecav"
-    # Identity filter: required by the constructor, unused for ECAV-only.
-    VDM = Matrix{Float64}(I, polydeg + 1, polydeg + 1)
-    filter = ones(polydeg + 1)
     semi = SemidiscretizationArtificialViscosity(mesh, (equations, equations_parabolic),
                                                  initial_condition, solver;
-                                                 VDM = VDM, filter = filter,
-                                                 ecav_choice = :ecav,
+                                                 ecav_choice = ecav_choice,
                                                  combine_rhs = Trixi.True(),
                                                  solver_parabolic = solver_parabolic,
                                                  boundary_conditions = (boundary_condition_periodic,

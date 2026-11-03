@@ -51,8 +51,51 @@ end
 # simplify the integration with Adapt.jl for GPU usage, see
 # https://github.com/trixi-framework/Trixi.jl/pull/2677#issuecomment-3591789921
 
+# Check `ecav_choice` and build the 1D SVV filter `F1D` and its adjoint `F1D_star`
+# (both `nothing` unless `ecav_choice == :ecav_svv`).
+function svv_filter_matrices(mesh, solver, ecav_choice, VDM, filter)
+    if ecav_choice === :ecav
+        return nothing, nothing
+    elseif ecav_choice === :ecav_ducros
+        mesh isa TreeMesh{3} ||
+            throw(ArgumentError("`ecav_choice = :ecav_ducros` is only implemented for `TreeMesh{3}`"))
+        return nothing, nothing
+    elseif ecav_choice !== :ecav_svv
+        throw(ArgumentError("unknown `ecav_choice = $(repr(ecav_choice))`; " *
+                            "use `:ecav`, `:ecav_svv` or `:ecav_ducros`"))
+    end
+
+    mesh isa Union{TreeMesh{2}, TreeMesh{3}} ||
+        throw(ArgumentError("`ecav_choice = :ecav_svv` is only implemented for `TreeMesh` in 2D and 3D"))
+
+    N = polydeg(solver)
+    if VDM === nothing
+        VDM, _ = vandermonde_legendre(get_nodes(solver.basis), N)
+    end
+    if filter === nothing
+        filter = [((m - 1) / N)^2 for m in 1:(N + 1)]
+    end
+    if size(VDM) != (N + 1, N + 1) || length(filter) != N + 1
+        throw(ArgumentError("SVV needs the 1D Vandermonde matrix of size $((N + 1, N + 1)) " *
+                            "and $(N + 1) filter coefficients (got `size(VDM) = $(size(VDM))`, " *
+                            "`length(filter) = $(length(filter))`); it is applied as a tensor " *
+                            "product in each direction, so do not pass `kron(V, V, ...)`"))
+    end
+
+    F1D = VDM * Diagonal(filter) * inv(VDM)
+    # Adjoint of the filter in the discrete L2 inner product, F* = W⁻¹ Fᵀ W.
+    # SVV uses the flux F*(K(u) F∇v), whose dissipation ⟨F∇v, K F∇v⟩_W is ≥ 0.
+    # For a filter that is diagonal in the Legendre modes, F* = F on both Gauss
+    # and LGL nodes (the modal mass matrix stays diagonal); F* differs for
+    # other filters or non-orthogonal Vandermonde matrices.
+    W = Diagonal(solver.basis.weights)
+    F1D_star = inv(W) * transpose(F1D) * W
+    return F1D, F1D_star
+end
+
 """
     SemidiscretizationArtificialViscosity(mesh, both_equations, initial_condition, solver;
+                                          ecav_choice=:ecav, VDM=nothing, filter=nothing,
                                           solver_parabolic=default_parabolic_solver(),
                                           source_terms=nothing,
                                           both_boundary_conditions=(boundary_condition_periodic, boundary_condition_periodic),
@@ -60,10 +103,21 @@ end
                                           uEltype=RealT)
 
 Construct a semidiscretization of a hyperbolic-parabolic PDE with artificial viscosity.
+
+`ecav_choice` (a `Symbol` or `String`) selects the artificial viscosity:
+- `:ecav`: entropy-correction artificial viscosity (ECAV) only.
+- `:ecav_svv`: ECAV plus spectral vanishing viscosity (SVV), `TreeMesh` in 2D and 3D.
+  The SVV filter is `F1D = VDM * Diagonal(filter) * inv(VDM)`, applied as a tensor
+  product in each direction. `VDM` is the 1D `(N+1) × (N+1)` Vandermonde matrix at the
+  solver nodes and `filter` the modal filter coefficients. They default to the Legendre
+  Vandermonde matrix and `filter = [((m - 1) / N)^2 for m in 1:(N + 1)]`.
+- `:ecav_ducros`: ECAV scaled by a Ducros sensor, `TreeMesh` in 3D.
+
+`VDM` and `filter` are only used for `:ecav_svv`.
 """
 function SemidiscretizationArtificialViscosity(mesh, equations::Tuple,
                                                initial_condition, solver;
-                                               VDM = I, filter = I, ecav_choice = :ecav,
+                                               ecav_choice = :ecav, VDM = nothing, filter = nothing,
                                                combine_rhs = False(),
                                                equations_artificial_viscosity = default_artificial_viscosity(equations[1]),
                                                solver_parabolic = default_parabolic_solver(),
@@ -88,13 +142,8 @@ function SemidiscretizationArtificialViscosity(mesh, equations::Tuple,
 
     cache = create_cache(mesh, equations, solver, RealT, uEltype)
 
-    F1D = VDM * Diagonal(filter) * inv(VDM);
-    # Adjoint of the filter in the discrete L2 inner product, F* = W⁻¹ Fᵀ W.
-    # SVV uses the flux F*(K(u) F∇v), whose dissipation ⟨F∇v, K F∇v⟩_W is ≥ 0.
-    # For LGL nodes F* ≠ F, since LGL quadrature does not integrate the
-    # highest Legendre mode exactly (for Gauss nodes F* = F up to round-off).
-    W = Diagonal(solver.basis.weights)
-    F1D_star = inv(W) * transpose(F1D) * W
+    ecav_choice = Symbol(ecav_choice) # also accept strings, e.g. "ecav_svv"
+    F1D, F1D_star = svv_filter_matrices(mesh, solver, ecav_choice, VDM, filter)
     cache = (; cache..., F1D, F1D_star, filter, ecav_choice,
              artificial_viscosity =
              create_cache(mesh, artificial_viscosity, solver, cache, RealT, uEltype))
