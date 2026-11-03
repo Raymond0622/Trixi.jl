@@ -304,7 +304,8 @@
     end
 
     # out[:, i, j] = Σ_l A[·, l] * in[:, ...] along one direction of a single element
-    @inline function apply_1d_operator!(out, A, in, direction, mesh::TreeMesh{2},
+    @inline function apply_1d_operator!(out, A, in, direction,
+                                        mesh::Union{TreeMesh{2}, P4estMesh{2}},
                                         equations, dg, element)
         for j in eachnode(dg), i in eachnode(dg)
             out_node = zero(get_node_vars(in, equations, dg, i, j, element))
@@ -324,7 +325,8 @@
 
     # out = (A ⊗ A) in on a single element; `tmp` is scratch. `out`, `tmp` and
     # `in` must be distinct arrays.
-    @inline function apply_tensor_operator!(out, tmp, A, in, mesh::TreeMesh{2},
+    @inline function apply_tensor_operator!(out, tmp, A, in,
+                                            mesh::Union{TreeMesh{2}, P4estMesh{2}},
                                             equations, dg, element)
         apply_1d_operator!(tmp, A, in, 1, mesh, equations, dg, element)
         apply_1d_operator!(out, A, tmp, 2, mesh, equations, dg, element)

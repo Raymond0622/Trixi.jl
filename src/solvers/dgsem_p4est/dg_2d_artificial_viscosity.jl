@@ -113,6 +113,144 @@
         return nothing
     end
 
+    # Symmetric SVV on curved elements, see the `TreeMesh{2}` version. The
+    # dissipation is measured in ⟨a, b⟩ = Σ w_i w_j |J_ij| a·b, so the adjoint of
+    # F = F1D ⊗ F1D is |J|⁻¹ (F1D_star ⊗ F1D_star) |J| with the nodal |J|.
+    # On `TreeMesh` J is constant per element and the |J| scalings cancel.
+    function calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                         filtered_parabolic, filtered_gradients,
+                                         tmp_gradient, tmp_parabolic,
+                                         entropy_residual, equations,
+                                         equations_artificial_viscosity,
+                                         mesh::P4estMesh{2}, dg, cache)
+        (; inverse_jacobian) = cache.elements
+        flux_parabolic_x, flux_parabolic_y = flux_parabolic
+        gradients_x, gradients_y = gradients
+        filtered_gradients_x, filtered_gradients_y = filtered_gradients
+        svv_flux_x, svv_flux_y = tmp_parabolic
+        filtered_parabolic_x, filtered_parabolic_y = filtered_parabolic
+
+        (; F1D, F1D_star) = cache
+        @threaded for element in eachelement(dg, cache)
+            # calculate viscous dissipation (ECAV denominator)
+            element_viscous_dissipation = zero(real(dg))
+            for j in eachnode(dg), i in eachnode(dg)
+                flux_viscous_x_node = get_node_vars(flux_parabolic_x, equations, dg, i, j,
+                                                    element)
+                flux_viscous_y_node = get_node_vars(flux_parabolic_y, equations, dg, i, j,
+                                                    element)
+                gradients_x_node = get_node_vars(gradients_x, equations, dg, i, j, element)
+                gradients_y_node = get_node_vars(gradients_y, equations, dg, i, j, element)
+
+                viscous_dissipation_x = dot(flux_viscous_x_node, gradients_x_node)
+                viscous_dissipation_y = dot(flux_viscous_y_node, gradients_y_node)
+
+                volume_jacobian = abs(inv(inverse_jacobian[i, j, element]))
+                weight_ij = dg.basis.weights[i] * dg.basis.weights[j]
+                element_viscous_dissipation = element_viscous_dissipation +
+                                              (viscous_dissipation_x +
+                                               viscous_dissipation_y) * weight_ij *
+                                              volume_jacobian
+            end
+
+            # F∇v
+            for dim in 1:2
+                apply_tensor_operator!(filtered_gradients[dim], tmp_gradient[dim], F1D,
+                                       gradients[dim], mesh, equations, dg, element)
+            end
+
+            # |J| K(u) F∇v and the SVV dissipation ⟨F∇v, K F∇v⟩
+            svv_element_viscous_dissipation = zero(real(dg))
+            for j in eachnode(dg), i in eachnode(dg)
+                u_node = get_node_vars(u_transformed, equations, dg, i, j, element)
+                filtered_gradients_x_node = get_node_vars(filtered_gradients_x, equations,
+                                                          dg, i, j, element)
+                filtered_gradients_y_node = get_node_vars(filtered_gradients_y, equations,
+                                                          dg, i, j, element)
+                filtered_gradients_node = (filtered_gradients_x_node,
+                                           filtered_gradients_y_node)
+                svv_flux_x_node = flux(u_node, filtered_gradients_node, 1,
+                                       equations_artificial_viscosity)
+                svv_flux_y_node = flux(u_node, filtered_gradients_node, 2,
+                                       equations_artificial_viscosity)
+
+                volume_jacobian = abs(inv(inverse_jacobian[i, j, element]))
+                set_node_vars!(svv_flux_x, volume_jacobian * svv_flux_x_node, equations,
+                               dg, i, j, element)
+                set_node_vars!(svv_flux_y, volume_jacobian * svv_flux_y_node, equations,
+                               dg, i, j, element)
+
+                svv_viscous_dissipation_x = dot(svv_flux_x_node, filtered_gradients_x_node)
+                svv_viscous_dissipation_y = dot(svv_flux_y_node, filtered_gradients_y_node)
+
+                weight_ij = dg.basis.weights[i] * dg.basis.weights[j]
+                svv_element_viscous_dissipation = svv_element_viscous_dissipation +
+                                                  (svv_viscous_dissipation_x +
+                                                   svv_viscous_dissipation_y) *
+                                                  weight_ij * volume_jacobian
+            end
+
+            # (F1D_star ⊗ F1D_star)(|J| K(u) F∇v); the |J|⁻¹ is applied below.
+            # `tmp_gradient` is free again and serves as scratch.
+            for dim in 1:2
+                apply_tensor_operator!(filtered_parabolic[dim], tmp_gradient[dim], F1D_star,
+                                       tmp_parabolic[dim], mesh, equations, dg, element)
+            end
+
+            # Match the TreeMesh sign convention: viscous terms are negated by
+            # convention in Trixi.jl, so the saved coefficients have opposite sign.
+            w = 1.0
+            num = min(0, entropy_residual[element])
+            denom = element_viscous_dissipation * element_viscous_dissipation +
+                    w * svv_element_viscous_dissipation * svv_element_viscous_dissipation
+            ecav_coefficient = (num * element_viscous_dissipation) / (denom + 1e-12)
+            svv_coefficient = (w * num * svv_element_viscous_dissipation) / (denom + 1e-12)
+
+            cache.artificial_viscosity.coefficients[element] = -ecav_coefficient # save output
+            cache.artificial_viscosity.svv_coefficients[element] = -svv_coefficient # save output
+            # Do not index `flux_parabolic` inside `@threaded`: the name shadows
+            # `Trixi.flux_parabolic`, so Polyester would capture it in a closure.
+            for j in eachnode(dg), i in eachnode(dg)
+                svv_factor = svv_coefficient * abs(inverse_jacobian[i, j, element])
+                multiply_multiply_add_to_node_vars!(flux_parabolic_x,
+                                                    ecav_coefficient, svv_factor,
+                                                    get_node_vars(filtered_parabolic_x,
+                                                                  equations, dg, i, j,
+                                                                  element),
+                                                    equations, dg, i, j, element)
+                multiply_multiply_add_to_node_vars!(flux_parabolic_y,
+                                                    ecav_coefficient, svv_factor,
+                                                    get_node_vars(filtered_parabolic_y,
+                                                                  equations, dg, i, j,
+                                                                  element),
+                                                    equations, dg, i, j, element)
+            end
+        end
+
+        push!(cache.artificial_viscosity.max_coeff,
+              maximum(cache.artificial_viscosity.coefficients))
+        return nothing
+    end
+
+    # Scale `flux_parabolic` by the ECAV (or ECAV + SVV) coefficients.
+    function calc_av_coefficients!(flux_parabolic, gradients, u_transformed,
+                                   entropy_residual, equations,
+                                   equations_artificial_viscosity, mesh::P4estMesh{2},
+                                   dg, cache, cache_parabolic)
+        if cache.ecav_choice == :ecav_svv
+            (; filtered_gradients, filtered_parabolic, tmp_gradient, tmp_parabolic) = cache_parabolic.parabolic_container
+            calc_ecav_svv_coefficients!(flux_parabolic, gradients, u_transformed,
+                                        filtered_parabolic, filtered_gradients,
+                                        tmp_gradient, tmp_parabolic,
+                                        entropy_residual, equations,
+                                        equations_artificial_viscosity, mesh, dg, cache)
+        else
+            calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
+                                    equations, mesh, dg, cache)
+        end
+        return nothing
+    end
+
     function calc_divergence_ecav_p4est!(du, flux_parabolic, u, mesh::P4estMesh{2},
                                          equations_parabolic,
                                          boundary_conditions_parabolic, dg,
@@ -219,8 +357,9 @@
                                    equations_artificial_viscosity, dg, cache)
         end
 
-        calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
-                                equations, mesh, dg, cache)
+        calc_av_coefficients!(flux_parabolic, gradients, u_transformed, entropy_residual,
+                              equations, equations_artificial_viscosity, mesh, dg, cache,
+                              cache_parabolic)
 
         @trixi_timeit timer() "calc divergence" begin
             calc_divergence_ecav_p4est!(du, flux_parabolic, u, mesh,
@@ -307,8 +446,9 @@
                                    equations_artificial_viscosity, dg, cache)
         end
 
-        calc_ecav_coefficients!(flux_parabolic, gradients, entropy_residual,
-                                equations, mesh, dg, cache)
+        calc_av_coefficients!(flux_parabolic, gradients, u_transformed, entropy_residual,
+                              equations, equations_artificial_viscosity, mesh, dg, cache,
+                              cache_parabolic)
 
         @trixi_timeit timer() "calculate viscous fluxes" begin
             accum_viscous_fluxes!(flux_parabolic, gradients, u_transformed, mesh,

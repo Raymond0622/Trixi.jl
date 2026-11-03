@@ -65,8 +65,9 @@ function svv_filter_matrices(mesh, solver, ecav_choice, VDM, filter)
                             "use `:ecav`, `:ecav_svv` or `:ecav_ducros`"))
     end
 
-    mesh isa Union{TreeMesh{2}, TreeMesh{3}} ||
-        throw(ArgumentError("`ecav_choice = :ecav_svv` is only implemented for `TreeMesh` in 2D and 3D"))
+    mesh isa Union{TreeMesh{2}, TreeMesh{3}, P4estMesh{2}} ||
+        throw(ArgumentError("`ecav_choice = :ecav_svv` is only implemented for `TreeMesh` in 2D and 3D " *
+                            "and `P4estMesh{2}`"))
 
     N = polydeg(solver)
     if VDM === nothing
@@ -106,7 +107,8 @@ Construct a semidiscretization of a hyperbolic-parabolic PDE with artificial vis
 
 `ecav_choice` (a `Symbol` or `String`) selects the artificial viscosity:
 - `:ecav`: entropy-correction artificial viscosity (ECAV) only.
-- `:ecav_svv`: ECAV plus spectral vanishing viscosity (SVV), `TreeMesh` in 2D and 3D.
+- `:ecav_svv`: ECAV plus spectral vanishing viscosity (SVV), `TreeMesh` in 2D and 3D
+  and `P4estMesh{2}` (conforming meshes).
   The SVV filter is `F1D = VDM * Diagonal(filter) * inv(VDM)`, applied as a tensor
   product in each direction. `VDM` is the 1D `(N+1) × (N+1)` Vandermonde matrix at the
   solver nodes and `filter` the modal filter coefficients. They default to the Legendre
